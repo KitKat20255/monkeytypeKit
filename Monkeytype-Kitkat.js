@@ -21,24 +21,6 @@
 // @noframes
 // ==/UserScript==
 
-/*
- * ONE-CLICK INSTALL
- * -----------------
- * 1) Host this file as a public raw URL (GitHub raw, Gist raw, or your site)
- *    Example: https://raw.githubusercontent.com/YOU/mt-kit/main/Monkeytype-Kit.user.js
- * 2) Share that URL. With Tampermonkey installed, opening the .user.js URL offers Install.
- * 3) Optional Tampermonkey helper link:
- *    https://www.tampermonkey.net/script_installation.php?url=ENCODED_RAW_URL
- * 4) Or publish on https://greasyfork.org for a store-style install button.
- *
- * MODULES (isolated IIFEs — separate storage keys / DOM ids)
- * - Eternal Archive  → #ea-* , IndexedDB, Ape Key via UI (APE_KEY constant left empty)
- * - Jail Mode        → #mt-jail-*
- * - Hotlist Multi    → original hotlist storage (poem#3305 credits)
- * - Kokoro Dictation → #mt-dict-* , needs local Kokoro API on localhost:8880
- */
-
-
 
 /* ========== 1. ETERNAL ARCHIVE ========== */
 (function () {
