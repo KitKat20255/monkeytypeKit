@@ -38,8 +38,12 @@ Enjoy :)
 
 Update @ 5 october 2026
 
-Added key confidence mode
-Added low confidence practice generation
+Added key confidence mode.
+
+Added low confidence practice generation.
+
 Added new metric to measure best possible wpm on a test based on your previous typing speed.
-Added type for tests, changed from mode "time 60" to mode "time" type "60"
-Various fixes to archive graphs generation
+
+Added type for tests, changed from mode "time 60" to mode "time" type "60".
+
+Various fixes to archive graphs generation.
