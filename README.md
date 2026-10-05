@@ -34,3 +34,12 @@ docker run -d -p 8880:8880 --name kokoro-tts -e KOKORO_API_KEY="monkeytypeuser" 
 It should start a new kokoro-tts container in the docker. It needs to be running in order for you to hear the dictation while you type in monkeytype.
 
 Enjoy :)
+
+
+Update @ 5 october 2026
+
+Added key confidence mode
+Added low confidence practice generation
+Added new metric to measure best possible wpm on a test based on your previous typing speed.
+Added type for tests, changed from mode "time 60" to mode "time" type "60"
+Various fixes to archive graphs generation
