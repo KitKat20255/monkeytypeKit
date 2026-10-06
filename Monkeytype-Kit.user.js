@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Monkeytype Kit Full (Archive + Jail + Hotlist + Dictation + Key Confidence)
 // @namespace    https://monkeytype.com/kit
-// @version      2.2.10
+// @version      2.2.31
 // @description  Bundle: Eternal Archive, Jail, Hotlist, Dictation, Key Confidence + Best WPM. Single Ape Key in Archive panel.
 // @author       kitkat + Grok
 // @match        https://monkeytype.com/*
@@ -160,6 +160,7 @@
   function resultTsMs(r) {
     let ts = Number(r && r.timestamp) || 0;
     if (ts && ts < 1e12) ts *= 1000;
+    if (!ts || ts < 946684800000) return 0;
     return ts;
   }
 
@@ -290,6 +291,120 @@
     // Pending stumbles survive tab close (localStorage) so later API/CSV import can attach them
   const SS_PENDING = 'ea_pending_stumbles';
   const LS_PENDING = 'ea_pending_stumbles_v2';
+  const LS_STUMBLE_INDEX = 'ea_stumble_index_v1';
+
+  function stumbleKey(r) {
+    if (!r) return null;
+    if (r._id) return 'id:' + String(r._id);
+    if (r.id && !String(r.id).startsWith('live_')) return 'id:' + String(r.id);
+    let ts = Number(r.timestamp) || 0;
+    if (ts && ts < 1e12) ts *= 1000;
+    if (!ts || r.wpm == null) return null;
+    return 't:' + ts + '|w:' + Number(r.wpm).toFixed(2) + '|a:' + (r.acc != null ? Number(r.acc).toFixed(2) : '');
+  }
+
+  function loadStumbleIndex() {
+    try {
+      const raw = localStorage.getItem(LS_STUMBLE_INDEX);
+      const o = raw ? JSON.parse(raw) : {};
+      return o && typeof o === 'object' ? o : {};
+    } catch (e) { return {}; }
+  }
+
+  function saveStumbleIndex(map) {
+    try {
+      const keys = Object.keys(map || {});
+      // Cap ~5000 entries, drop oldest by t
+      if (keys.length > 5000) {
+        const entries = keys.map(k => ({ k, t: map[k] && map[k].t || 0 }))
+          .sort((a, b) => b.t - a.t)
+          .slice(0, 5000);
+        const next = {};
+        for (const e of entries) next[e.k] = map[e.k];
+        map = next;
+      }
+      localStorage.setItem(LS_STUMBLE_INDEX, JSON.stringify(map));
+    } catch (e) {}
+  }
+
+  /** Persist stumble permanently (survives CSV reimport / pending consume) */
+  function rememberStumble(result) {
+    if (!result || result.stumblePct == null || !(Number(result.totalWords) > 0)) return;
+    const map = loadStumbleIndex();
+    const entry = {
+      stumbledWords: Number(result.stumbledWords) || 0,
+      cleanWords: Number(result.cleanWords) || 0,
+      totalWords: Number(result.totalWords) || 0,
+      stumblePct: Number(result.stumblePct),
+      t: Date.now()
+    };
+    const k = stumbleKey(result);
+    if (k) map[k] = entry;
+    // Secondary key without id for live→server merge
+    if (result.wpm != null) {
+      let ts = Number(result.timestamp) || 0;
+      if (ts && ts < 1e12) ts *= 1000;
+      if (ts) {
+        const k2 = 't:' + ts + '|w:' + Number(result.wpm).toFixed(2) + '|a:' + (result.acc != null ? Number(result.acc).toFixed(2) : '');
+        map[k2] = entry;
+      }
+    }
+    saveStumbleIndex(map);
+  }
+
+  /** Restore stumble from permanent index if result is missing it */
+  function applyStumbleIndex(result) {
+    if (!result) return result;
+    if (result.stumblePct != null && Number(result.totalWords) > 0) return result;
+    const map = loadStumbleIndex();
+    const k = stumbleKey(result);
+    let hit = k && map[k];
+    if (!hit && result.wpm != null) {
+      let ts = Number(result.timestamp) || 0;
+      if (ts && ts < 1e12) ts *= 1000;
+      if (ts) {
+        const k2 = 't:' + ts + '|w:' + Number(result.wpm).toFixed(2) + '|a:' + (result.acc != null ? Number(result.acc).toFixed(2) : '');
+        hit = map[k2];
+      }
+    }
+    if (!hit) return result;
+    result.stumbledWords = hit.stumbledWords;
+    result.cleanWords = hit.cleanWords;
+    result.totalWords = hit.totalWords;
+    result.stumblePct = hit.stumblePct;
+    return result;
+  }
+
+  /**
+   * Re-attach stumbles to last N results from index + pending.
+   * Never clears an existing stumble value.
+   */
+  async function reconcileStumblesLastN(n) {
+    n = n || 1000;
+    const all = await getAllResults();
+    const sorted = all.slice().sort((a, b) => {
+      let ta = Number(a.timestamp) || 0; let tb = Number(b.timestamp) || 0;
+      if (ta && ta < 1e12) ta *= 1000; if (tb && tb < 1e12) tb *= 1000;
+      return tb - ta;
+    }).slice(0, n);
+    let fixed = 0;
+    for (const r of sorted) {
+      if (r.stumblePct != null && Number(r.totalWords) > 0) {
+        rememberStumble(r); // backfill index from existing good data
+        continue;
+      }
+      const before = r.stumblePct;
+      applyStumbleIndex(r);
+      matchPendingStumble(r); // consume pending if matches
+      if (r.stumblePct != null && r.stumblePct !== before) {
+        rememberStumble(r);
+        try { await saveResult(r); } catch (e) {}
+        fixed++;
+      }
+    }
+    console.log('[EA] reconcile stumbles last', n, 'fixed', fixed);
+    return fixed;
+  }
 
   function loadPendingStumbles() {
     try {
@@ -306,11 +421,11 @@
 
   function savePendingStumbles(arr) {
     try {
-      // Keep last 2000, drop older than 30 days — heavy quote days need room
+      // Keep last 500, drop older than 2 days
       const now = Date.now();
       const trimmed = (arr || [])
-        .filter(p => p && now - (p.t || 0) < 30 * 24 * 60 * 60 * 1000)
-        .slice(-2000);
+        .filter(p => p && now - (p.t || 0) < 2 * 24 * 60 * 60 * 1000)
+        .slice(-500);
       localStorage.setItem(LS_PENDING, JSON.stringify(trimmed));
       sessionStorage.setItem(SS_PENDING, JSON.stringify(trimmed));
     } catch (e) {}
@@ -336,33 +451,213 @@
     savePendingStumbles(filtered);
   }
 
-  function readWpmFromResultDOM() {
+  
+  /** Fallback when MT no longer uses .group classes — parse #result.innerText */
+  function scrapeResultFromInnerText() {
+    const root = document.querySelector('#result') || document.querySelector('.pageResult');
+    if (!root) return null;
+    let block = '';
     try {
-      const candidates = [
-        document.querySelector('#result .group.wpm .bottom'),
-        document.querySelector('.group.wpm .bottom'),
-        document.querySelector('#result .wpm'),
-        document.querySelector('.pageTest .group.wpm .bottom')
-      ].filter(Boolean);
-      for (const el of candidates) {
-        const n = parseFloat((el.textContent || '').replace(/[^0-9.]/g, ''));
-        if (!isNaN(n) && n > 0) return n;
-      }
-    } catch (e) {}
+      const clone = root.cloneNode(true);
+      clone.querySelectorAll(
+        '#kc-root, .kc-panel, [id*="keyconf"], [class*="keyconf"], [class*="KeyConf"]'
+      ).forEach(el => { try { el.remove(); } catch (e) {} });
+      clone.querySelectorAll('*').forEach(el => {
+        try {
+          const t = (el.textContent || '').trim().slice(0, 40);
+          if (/^best possible/i.test(t)) el.remove();
+        } catch (e) {}
+      });
+      block = clone.innerText || clone.textContent || '';
+    } catch (e) {
+      block = root.innerText || root.textContent || '';
+    }
+    block = block.replace(/best possible[^\n]*/gi, ' ');
+    if (!block || block.length < 10) return null;
+
+    const out = {};
+    // Collect all wpm candidates; NEVER take a number that is the "100" from "100%" 
+    const allWpm = [];
+    const re = /\bwpm\b([^\d%]{0,15})(\d+(?:\.\d+)?)(\s*%)?/gi;
+    let m;
+    while ((m = re.exec(block)) !== null) {
+      if (m[3]) continue; // followed by % → not wpm
+      const n = parseFloat(m[2]);
+      if (!isNaN(n) && n >= 5 && n < 400) allWpm.push(n);
+    }
+    if (allWpm.length) {
+      const decimals = allWpm.filter(n => n % 1 !== 0);
+      const non100 = allWpm.filter(n => n !== 100);
+      if (decimals.length) out.wpm = decimals[0];
+      else if (non100.length) out.wpm = non100[0];
+      else out.wpm = allWpm[0];
+    }
+
+    const accM = block.match(/\bacc(?:uracy)?\b[^\d]{0,12}(\d+(?:\.\d+)?)\s*%?/i);
+    if (accM) {
+      const n = parseFloat(accM[1]);
+      if (!isNaN(n) && n > 0 && n <= 100) out.acc = n;
+    }
+    const rawM = block.match(/\braw\b([^\d%]{0,12})(\d+(?:\.\d+)?)(\s*%)?/i);
+    if (rawM && !rawM[3]) {
+      const n = parseFloat(rawM[2]);
+      if (!isNaN(n) && n >= 5 && n < 400) out.rawWpm = n;
+    }
+    // If wpm still 100 but raw is sensible, prefer raw
+    if (out.wpm === 100 && out.rawWpm && Math.abs(out.rawWpm - 100) > 3) {
+      out.wpm = out.rawWpm;
+    }
+
+    if (/\bquote\b/i.test(block)) {
+      out.mode = 'quote';
+      if (/\bshort\b/i.test(block)) { out.type = 'short'; out.quoteLength = 0; out.mode2 = '0'; }
+      else if (/\bmedium\b/i.test(block)) { out.type = 'medium'; out.quoteLength = 1; out.mode2 = '1'; }
+      else if (/\blong\b/i.test(block)) { out.type = 'long'; out.quoteLength = 2; out.mode2 = '2'; }
+      else if (/\bthicc\b|\bthick\b/i.test(block)) { out.type = 'thicc'; out.quoteLength = 3; out.mode2 = '3'; }
+      else { out.type = 'short'; out.mode2 = '0'; }
+    } else if (/\bzen\b/i.test(block)) {
+      out.mode = 'zen'; out.type = 'zen'; out.mode2 = 'zen';
+    } else if (/\bwords\b/i.test(block)) {
+      out.mode = 'words';
+      const wm = block.match(/\b(10|25|50|100)\b/);
+      out.type = wm ? wm[1] : 'custom'; out.mode2 = out.type;
+    } else if (/\btime\b/i.test(block)) {
+      out.mode = 'time';
+      const tm = block.match(/\b(15|30|60|120)\b/);
+      out.type = tm ? tm[1] : '60'; out.mode2 = out.type;
+    }
+    if (/\benglish\b/i.test(block)) out.language = 'english';
+    if (/\beclipse\b/i.test(block)) {
+      try { out.tags = resolveTagNamesToIds(['eclipse']); } catch (e) { out.tags = ['eclipse']; }
+    }
+    if (out.wpm) return out;
     return null;
   }
 
+  
+  function readWpmFromResultDOM() {
+    try {
+      const parseNum = (t, min, max) => {
+        if (t == null) return null;
+        const m = String(t).trim().match(/(\d+(?:\.\d+)?)/);
+        if (!m) return null;
+        const n = parseFloat(m[1]);
+        if (isNaN(n) || n < (min ?? 5) || n >= (max ?? 400)) return null;
+        return n;
+      };
+
+      // 1) Classic selectors
+      for (const sel of [
+        '#result .group.wpm .bottom',
+        '#result .group.wpm .bottom span',
+        '#result .stats .group.wpm .bottom',
+        '.pageResult .group.wpm .bottom',
+        '#result [class*="wpm"] .bottom',
+        '#result .wpm'
+      ]) {
+        const el = document.querySelector(sel);
+        if (!el) continue;
+        const n = parseNum(el.innerText || el.textContent);
+        if (n != null) return n;
+      }
+
+      // 2) Any element under #result whose own text is exactly "wpm" → sibling/parent number
+      const root = document.querySelector('#result') || document.querySelector('.pageResult');
+      if (root) {
+        const walk = root.querySelectorAll('div, span, p, td, li, label');
+        for (const el of walk) {
+          // only leaf-ish labels
+          const own = (el.childNodes.length === 1 && el.childNodes[0].nodeType === 3)
+            ? el.textContent.trim().toLowerCase()
+            : (el.firstChild && el.firstChild.nodeType === 3 ? el.firstChild.textContent.trim().toLowerCase() : '');
+          if (own !== 'wpm' && own !== 'words per minute') continue;
+          const parent = el.parentElement;
+          if (!parent) continue;
+          // number often in next sibling or parent's other child
+          let n = null;
+          for (const sib of parent.children) {
+            if (sib === el) continue;
+            n = parseNum(sib.innerText || sib.textContent);
+            if (n != null) return n;
+          }
+          n = parseNum(parent.innerText);
+          if (n != null) return n;
+        }
+
+        // 3) innerText block parse: "wpm\n37.54" or "wpm 37.54"
+        const block = root.innerText || root.textContent || '';
+        let m = block.match(/\bwpm\b[^\d]{0,10}(\d+(?:\.\d+)?)/i);
+        if (m) {
+          const n = parseFloat(m[1]);
+          if (!isNaN(n) && n >= 5 && n < 400) return n;
+        }
+      }
+
+      return null;
+    } catch (e) {
+      console.warn('[EA] readWpm error', e);
+      return null;
+    }
+  }
+
+  
   function readNumFromResultGroup(groupClass) {
     try {
-      const el = document.querySelector('#result .group.' + groupClass + ' .bottom')
-        || document.querySelector('.group.' + groupClass + ' .bottom');
-      if (!el) return null;
-      const n = parseFloat((el.textContent || '').replace(/[^0-9.]/g, ''));
-      return isNaN(n) ? null : n;
+      const parseNum = (t) => {
+        if (t == null) return null;
+        const m = String(t).trim().match(/(\d+(?:\.\d+)?)/);
+        if (!m) return null;
+        const n = parseFloat(m[1]);
+        return isNaN(n) ? null : n;
+      };
+      const want = groupClass.toLowerCase();
+      const aliases = want === 'acc' || want === 'accuracy' ? ['acc', 'accuracy']
+        : want === 'raw' ? ['raw', 'raw wpm']
+        : want === 'consistency' ? ['consistency', 'cons']
+        : [want];
+
+      for (const a of aliases) {
+        const el = document.querySelector('#result .group.' + a + ' .bottom')
+          || document.querySelector('.pageResult .group.' + a + ' .bottom');
+        if (el) {
+          const n = parseNum(el.innerText || el.textContent);
+          if (n != null) return n;
+        }
+      }
+
+      const root = document.querySelector('#result') || document.querySelector('.pageResult');
+      if (!root) return null;
+
+      // Label walk
+      for (const el of root.querySelectorAll('div, span, p, label')) {
+        const own = (el.childNodes.length && el.childNodes[0].nodeType === 3)
+          ? el.childNodes[0].textContent.trim().toLowerCase()
+          : '';
+        if (!aliases.includes(own)) continue;
+        const parent = el.parentElement;
+        if (!parent) continue;
+        for (const sib of parent.children) {
+          if (sib === el) continue;
+          const n = parseNum(sib.innerText || sib.textContent);
+          if (n != null) return n;
+        }
+      }
+
+      // innerText: "acc\n95.45%" or "accuracy 95.45"
+      const block = root.innerText || '';
+      for (const a of aliases) {
+        const re = new RegExp('\\\\b' + a + '\\\\b[^\\\\d]{0,10}(\\\\d+(?:\\\\.\\\\d+)?)', 'i');
+        const m = block.match(re);
+        if (m) {
+          const n = parseFloat(m[1]);
+          if (!isNaN(n)) return n;
+        }
+      }
+      return null;
     } catch (e) { return null; }
   }
 
-  /** Best-effort scrape of the finished test from the result screen DOM */
+  
   function readResultGroupMap() {
     // Parse #result .group blocks: { "test type": "quote short english", "tags": "eclipse", ... }
     const map = {};
@@ -430,9 +725,17 @@
   }
 
   function readResultFromDOM() {
-    const wpm = readWpmFromResultDOM();
+    let wpm = readWpmFromResultDOM();
+    let acc = readNumFromResultGroup('acc') ?? readNumFromResultGroup('accuracy');
+    let scraped = null;
+    if (wpm == null || wpm <= 0 || acc == null) {
+      scraped = scrapeResultFromInnerText();
+      if (scraped) {
+        if (wpm == null || wpm <= 0) wpm = scraped.wpm;
+        if (acc == null && scraped.acc != null) acc = scraped.acc;
+      }
+    }
     if (wpm == null || wpm <= 0) return null;
-    const acc = readNumFromResultGroup('acc') ?? readNumFromResultGroup('accuracy');
     const raw = readNumFromResultGroup('raw');
     const cons = readNumFromResultGroup('consistency');
 
@@ -514,6 +817,32 @@
         const rawTags = tagStr.split(/[,\s]+/).map(s => s.trim())
           .filter(s => s && !/^tags?$/i.test(s) && s.length < 40);
         tags = resolveTagNamesToIds(rawTags);
+      }
+      // Fallback: active tags from config (chip on result / top bar)
+      if (!tags.length) {
+        try {
+          const w = typeof pageWin === 'function' ? pageWin() : window;
+          const cfgTags = w?.config?.tags || w?.db?.getSnapshot?.()?.tags || [];
+          const active = (Array.isArray(cfgTags) ? cfgTags : [])
+            .filter(t => t && (t.active === true || t.active === 'true'))
+            .map(t => String(t._id || t.id || t.name || t))
+            .filter(Boolean);
+          if (active.length) tags = resolveTagNamesToIds(active);
+        } catch (e) {}
+      }
+      // Fallback: visible tag text on result (e.g. "eclipse" under tags)
+      if (!tags.length) {
+        try {
+          const tagEls = document.querySelectorAll(
+            '#result .tags .tag, #result .group.tags .bottom .tag, .pageResult .tags .tag, #result .tags'
+          );
+          const raw = [];
+          tagEls.forEach(el => {
+            const t = (el.textContent || '').trim();
+            if (t && t.length < 40 && !/^tags?$/i.test(t)) raw.push(t);
+          });
+          if (raw.length) tags = resolveTagNamesToIds(raw);
+        } catch (e) {}
       }
       if (groups['difficulty']) {
         const d = groups['difficulty'].toLowerCase();
@@ -697,67 +1026,72 @@
     };
   }
 
-  function matchPendingStumble(result) {
+  function matchPendingStumble(result, opts) {
     if (!result) return result;
-    // Allow upgrade when stored stumble is 0/empty but pending has a real count
-    const hasReal = result.stumblePct != null && Number(result.stumbledWords || 0) > 0;
-    if (hasReal) return result;
+    const consume = !(opts && opts.noConsume);
+    // Already has a real non-null stumblePct with word counts
+    if (result.stumblePct != null && result.totalWords > 0) return result;
+
     const list = loadPendingStumbles();
     if (!list.length) return result;
 
     let ts = Number(result.timestamp) || 0;
     if (ts && ts < 1e12) ts *= 1000;
-    // Server timestamps can be seconds; also allow "now" when missing
     if (!ts) ts = Date.now();
     const wpm = Number(result.wpm) || 0;
     const acc = Number(result.acc) || 0;
 
     let best = null;
+    let bestIdx = -1;
     let bestScore = Infinity;
-    for (const p of list) {
+    const MAX_DT = 2 * 24 * 60 * 60 * 1000; // 2 days — match live stumbles to later CSV import
+    for (let i = 0; i < list.length; i++) {
+      const p = list[i];
+      if (!p || p._used) continue;
       const dt = Math.abs((p.t || 0) - ts);
-      // Allow up to 24h — delayed "Update now" / CSV export later same day
-      if (dt > 24 * 60 * 60 * 1000) continue;
-      let score = dt / 1000; // prefer closer in time
+      if (dt > MAX_DT) continue;
+      let score = dt / 1000;
       if (p.wpm != null && wpm) {
-        const dw = Math.abs(p.wpm - wpm);
-        if (dw > 4) continue; // tight WPM gate
-        score += dw * 30;
-      } else if (wpm && p.wpm == null) {
-        score += 50; // mild penalty if pending has no wpm
+        const dw = Math.abs(Number(p.wpm) - wpm);
+        if (dw > 1.5) continue;
+        score += dw * 40;
+      } else {
+        score += 80;
       }
       if (p.acc != null && acc) {
-        const da = Math.abs(p.acc - acc);
-        if (da > 3) continue;
-        score += da * 10;
+        const da = Math.abs(Number(p.acc) - acc);
+        if (da > 2) continue;
+        score += da * 15;
       }
-      if (p.mode && result.mode && String(p.mode) !== String(result.mode)) {
-        score += 40;
-      }
+      if (p.mode && result.mode && String(p.mode) !== String(result.mode)) continue;
       if (score < bestScore) {
         bestScore = score;
         best = p;
+        bestIdx = i;
       }
     }
     if (!best) return result;
-    const curS = Number(result.stumbledWords) || 0;
-    const newS = Number(best.stumbled) || 0;
-    // Prefer pending when it has more stumbles or we had none
-    if (result.stumblePct == null || newS > curS || (curS === 0 && best.total > 0)) {
-      result.stumbledWords = best.stumbled;
-      result.cleanWords = best.clean;
-      result.totalWords = best.total;
-      result.stumblePct = best.stumblePct;
+
+    result.stumbledWords = best.stumbled;
+    result.cleanWords = best.clean;
+    result.totalWords = best.total;
+    result.stumblePct = best.stumblePct;
+
+    if (consume && bestIdx >= 0) {
+      list.splice(bestIdx, 1);
+      try { savePendingStumbles(list); } catch (e) {}
     }
     return result;
   }
 
   function applyPendingToResults(results) {
-    return (results || []).map(r => matchPendingStumble(r));
+    return (results || []).map(r => matchPendingStumble(r, { noConsume: true }));
   }
 
   async function saveResult(result) {
+    applyStumbleIndex(result);
     matchPendingStumble(result);
+    if (result.stumblePct != null) rememberStumble(result);
     const dup = await findDuplicateResult(result);
     let oldLiveId = null;
     if (dup) {
@@ -1210,13 +1544,24 @@
 
   function normalizeResult(raw) {
     const r = { ...raw };
-    r.timestamp = Number(r.timestamp) || Date.now();
+    {
+      let ts = Number(r.timestamp);
+      if (ts && ts < 1e12) ts *= 1000; // seconds → ms
+      // Reject epoch / pre-2000 (1/1/1970 bug)
+      if (!ts || ts < 946684800000 || ts > Date.now() + 864e5) ts = Date.now();
+      r.timestamp = ts;
+    }
     r.wpm = Number(r.wpm) || 0;
     r.rawWpm = Number(r.rawWpm || r.raw) || r.wpm;
-    r.acc = Number(r.acc) || 0;
-    r.consistency = Number(r.consistency) || 0;
-    r.mode = r.mode || 'time';
-    r.mode2 = r.mode2 != null ? String(r.mode2) : '60';
+    // Keep null when unknown — do NOT invent 0% acc or time/60
+    if (r.acc != null && r.acc !== '') r.acc = Number(r.acc);
+    else r.acc = null;
+    if (r.consistency != null && r.consistency !== '') r.consistency = Number(r.consistency);
+    else r.consistency = null;
+    if (r.mode) r.mode = String(r.mode);
+    else r.mode = null;
+    if (r.mode2 != null && r.mode2 !== '') r.mode2 = String(r.mode2);
+    else r.mode2 = null;
     r.language = fixLanguageName(r.language);
     r.difficulty = r.difficulty || 'normal';
     r.punctuation = !!r.punctuation;
@@ -1548,20 +1893,45 @@
   setTimeout(bindWordsObserver, 500);
 
   function isResultScreenVisible() {
+    if (document.getElementById('resultWordsHistory') ||
+        document.querySelector('#resultWordsHistory, .resultWordsHistory')) return true;
     const r = document.querySelector('#result');
-    if (!r) return false;
-    const style = window.getComputedStyle(r);
-    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
-    if (r.offsetHeight < 20) return false;
-    return !!(r.querySelector('.group.wpm, .wrapper .group'));
+    if (!r || r.classList.contains('hidden')) return false;
+    try {
+      const style = window.getComputedStyle(r);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+    } catch (e) {}
+    const wpmEl = r.querySelector('.group.wpm .bottom, .wpm .bottom, .group.wpm');
+    if (wpmEl) {
+      const n = parseFloat(String(wpmEl.textContent || '').replace(/[^0-9.]/g, ''));
+      if (!isNaN(n) && n > 0) return true;
+    }
+    return !!(r.offsetHeight > 40 && r.querySelector('.group.wpm, .group.acc'));
   }
 
   function isTestActive() {
-    if (isResultScreenVisible()) return false;
-    const input = document.querySelector('#wordsInput');
     const words = document.querySelector('#words');
+    const input = document.querySelector('#wordsInput');
+    const wordsLive = !!(words && words.querySelector('.word') && words.offsetHeight > 0);
+    // Only treat as result-screen when WPM score is actually painted (not a hidden shell)
+    const r = document.querySelector('#result');
+    let resultDone = false;
+    if (r && !r.classList.contains('hidden')) {
+      const st = window.getComputedStyle(r);
+      if (st.display !== 'none' && st.visibility !== 'hidden' && Number(st.opacity) > 0.05) {
+        const wpmEl = r.querySelector('.group.wpm .bottom, .wpm .bottom');
+        const wpmTxt = (wpmEl && wpmEl.textContent || '').trim();
+        if (wpmTxt && /\d/.test(wpmTxt) && r.offsetHeight > 40) resultDone = true;
+      }
+    }
+    if (resultDone) return false;
     if (input && document.activeElement === input) return true;
-    if (words && words.querySelector('.word') && words.offsetHeight > 0) return true;
+    if (wordsLive) return true;
+    // Keep session alive briefly if we were mid-test (focus loss)
+    if (session && session.started && !session._finalized && session.keys && session.keys.length) {
+      const last = session.keys[session.keys.length - 1];
+      if (last && Date.now() - last.ts < 3000) return true;
+    }
     return false;
   }
 
@@ -1796,8 +2166,10 @@
           patchLatestResultWithStumble(frozenStumbleSnapshot);
         }
       }, 200);
-      setTimeout(() => { if (gen === eaCaptureGen) tryCaptureFromPage(); }, 600);
-      setTimeout(() => { if (gen === eaCaptureGen) tryCaptureFromPage(); }, 1200);
+      setTimeout(() => { if (gen === eaCaptureGen) tryCaptureFromPage(); }, 400);
+      setTimeout(() => { if (gen === eaCaptureGen) tryCaptureFromPage(); }, 900);
+      setTimeout(() => { if (gen === eaCaptureGen) tryCaptureFromPage(); }, 1800);
+      setTimeout(() => { if (gen === eaCaptureGen) tryCaptureFromPage(); }, 3000);
     }
     if (!vis && wasResultVisible) {
       // Leaving result (incl. quick Enter restart): bump gen so delayed captures stop.
@@ -2051,9 +2423,162 @@
       }
 
       if (!r || !r.wpm) {
+        // Last-chance: scan #result for wpm-labeled group text
+        try {
+          let w = readWpmFromResultDOM();
+          let a = readNumFromResultGroup('acc') ?? readNumFromResultGroup('accuracy');
+          const scraped = scrapeResultFromInnerText();
+          if (scraped) {
+            if (w == null) w = scraped.wpm;
+            if (a == null) a = scraped.acc;
+            console.log('[EA] innerText scrape', scraped);
+          }
+          if (w) {
+            r = Object.assign({}, scraped || {}, r || {});
+            r.wpm = w;
+            if (a != null) r.acc = a;
+            if (scraped) {
+              if (scraped.mode && !r.mode) r.mode = scraped.mode;
+              if (scraped.type && !r.type) r.type = scraped.type;
+              if (scraped.mode2 != null && r.mode2 == null) r.mode2 = scraped.mode2;
+              if (scraped.tags && scraped.tags.length && !(r.tags && r.tags.length)) r.tags = scraped.tags;
+              if (scraped.language && !r.language) r.language = scraped.language;
+            }
+            console.log('[EA] last-chance wpm', w, 'acc', a, 'mode', r.mode);
+          }
+        } catch (e) { console.warn('[EA] last-chance', e); }
+      }
+      if (!r || !r.wpm) {
+        // Debug: what groups exist on result screen?
+        try {
+          const groups = [];
+          document.querySelectorAll('#result .group, .pageResult .group').forEach(g => {
+            const top = (g.querySelector('.top, .label, .title')?.textContent || '').trim();
+            const bot = (g.querySelector('.bottom, .val, .value')?.textContent || '').trim().slice(0, 40);
+            groups.push(top + '=' + bot);
+          });
+          console.warn('[EA] capture skip — no wpm from DOM/snapshot', {
+            dom: dom && dom.wpm, snap: snapNewest && snapNewest.wpm,
+            hist: !!(document.getElementById('resultWordsHistory') || document.querySelector('.resultWordsHistory')),
+            resultEl: !!document.querySelector('#result'),
+            groups: groups.slice(0, 20)
+          });
+        } catch (e) {
+          console.warn('[EA] capture skip — no wpm', e);
+        }
         if (s) await patchLatestResultWithStumble(s);
         return;
       }
+      // Reject obvious garbage (failed parse placeholders)
+      let accN = (r.acc != null && r.acc !== '') ? Number(r.acc)
+        : (r.accuracy != null && r.accuracy !== '') ? Number(r.accuracy) : null;
+      if (accN != null && isNaN(accN)) accN = null;
+
+      if (!(Number(r.wpm) > 0 && Number(r.wpm) < 400)) {
+        console.warn('[EA] capture skip — absurd wpm', r.wpm);
+        return;
+      }
+      // Recover acc when null/0 (Number(null)===0 was rejecting every live save)
+      if (accN == null || (accN === 0 && Number(r.wpm) >= 15)) {
+        const retryAcc = readNumFromResultGroup('acc') ?? readNumFromResultGroup('accuracy');
+        if (retryAcc != null && retryAcc > 0 && retryAcc <= 100) {
+          r.acc = retryAcc;
+          accN = retryAcc;
+          console.log('[EA] acc recovered from DOM', retryAcc);
+        }
+      }
+      if ((accN == null || accN === 0) && snapNewest && Number(snapNewest.acc) > 0) {
+        if (Math.abs(Number(snapNewest.wpm) - Number(r.wpm)) <= 1.5) {
+          r.acc = Number(snapNewest.acc);
+          accN = r.acc;
+          if (snapNewest.mode && !r.mode) r.mode = snapNewest.mode;
+          console.log('[EA] acc recovered from snapshot', accN);
+        }
+      }
+      // NEVER skip just because acc is missing/0 — that blocked 72.49 saves
+      if (accN != null && (accN < 0 || accN > 100)) {
+        console.warn('[EA] capture skip — absurd acc', accN);
+        return;
+      }
+      if (!r.mode) {
+        try {
+          const dom2 = readResultFromDOM();
+          if (dom2 && dom2.mode) {
+            r.mode = dom2.mode;
+            if (dom2.mode2 != null) r.mode2 = dom2.mode2;
+            if (dom2.type) r.type = dom2.type;
+            if (dom2.tags && dom2.tags.length && !(r.tags && r.tags.length)) r.tags = dom2.tags;
+            if (dom2.acc != null && (accN == null || accN === 0)) { r.acc = dom2.acc; accN = dom2.acc; }
+          }
+        } catch (e) {}
+        if (!r.mode) {
+          if (document.getElementById('resultWordsHistory') || document.querySelector('.resultWordsHistory')) {
+            r.mode = 'quote';
+            r.type = r.type || 'short';
+            console.log('[EA] mode defaulted to quote');
+          } else {
+            console.warn('[EA] capture skip — missing mode', r.wpm, accN);
+            return;
+          }
+        }
+      }
+      // DOM is the only source of truth for on-screen result
+      {
+        const domW = readWpmFromResultDOM();
+        const domA = readNumFromResultGroup('acc') ?? readNumFromResultGroup('accuracy');
+        if (domW != null) r.wpm = domW;
+        if (domA != null && domA > 0) { r.acc = domA; accN = domA; }
+        try {
+          const d = readResultFromDOM();
+          if (d) {
+            if (d.wpm != null) r.wpm = d.wpm;
+            if (d.acc != null && d.acc > 0) { r.acc = d.acc; accN = d.acc; }
+            if (d.mode) r.mode = d.mode;
+            if (d.mode2 != null) r.mode2 = d.mode2;
+            if (d.type) r.type = d.type;
+            if (d.language) r.language = d.language;
+            if (d.tags && d.tags.length) r.tags = d.tags;
+            if (d.quoteLength != null) r.quoteLength = d.quoteLength;
+          }
+        } catch (e) {}
+        // KeyConf "Best possible: X wpm 100% acc" was parsed as wpm=100
+        if (Number(r.wpm) === 100) {
+          const raw = Number(r.rawWpm || r.raw);
+          if (raw > 0 && Math.abs(raw - 100) > 3) {
+            console.warn('[EA] wpm 100 looks like parse of 100% — using raw', raw);
+            r.wpm = raw;
+          } else {
+            // Try one more scrape
+            const s2 = scrapeResultFromInnerText();
+            if (s2 && s2.wpm && s2.wpm !== 100) {
+              console.warn('[EA] wpm 100 rejected, using scrape', s2.wpm);
+              r.wpm = s2.wpm;
+              if (s2.acc) { r.acc = s2.acc; accN = s2.acc; }
+              if (s2.mode) r.mode = s2.mode;
+              if (s2.type) r.type = s2.type;
+            } else if (accN == null || Number(accN) === 0) {
+              console.warn('[EA] capture skip — garbage 100/0 parse');
+              return;
+            }
+          }
+        }
+        // Force mode quote when test type text says quote
+        try {
+          const rt = (document.querySelector('#result') || document.body).innerText || '';
+          if (/\bquote\b/i.test(rt) && r.mode === 'time') {
+            r.mode = 'quote';
+            if (/\bshort\b/i.test(rt)) { r.type = 'short'; r.mode2 = '0'; }
+          }
+        } catch (e) {}
+      }
+      // Force valid timestamp (never 1970/epoch)
+      {
+        let ts = Number(r.timestamp) || 0;
+        if (ts && ts < 1e12) ts *= 1000;
+        if (!ts || ts < 946684800000 || ts > Date.now() + 60000) r.timestamp = Date.now();
+        else r.timestamp = ts;
+      }
+      console.log('[EA] capturing live result', r.wpm, r.mode, r.type || r.mode2, 'acc', r.acc != null ? r.acc : accN, 'ts', r.timestamp);
       // Guard: never save a result whose wpm is not on the result screen
       if (dom && dom.wpm && Math.abs(Number(r.wpm) - Number(dom.wpm)) > 0.51) {
         r.wpm = dom.wpm;
@@ -2075,18 +2600,15 @@
       }
       if (stumbleSrc && stumbleSrc.total > 0) {
         // Real finish: has word count from freeze (0 stumbles is valid — perfect quote)
-        const meaningful = isResultScreenVisible() ||
-          (r.acc != null && Number(r.acc) > 0) ||
-          (stumbleSrc.stumbled > 0);
-        if (meaningful) {
+        {
           r.stumbledWords = stumbleSrc.stumbled;
           r.cleanWords = stumbleSrc.clean;
           r.totalWords = stumbleSrc.total;
           r.stumblePct = stumbleSrc.stumblePct != null
             ? stumbleSrc.stumblePct
             : (stumbleSrc.total ? (100 * stumbleSrc.stumbled / stumbleSrc.total) : 0);
-          // Always queue (including perfect 0-stumble runs) so sync/import can re-attach
           queuePendingStumble(stumbleSrc, r.wpm, { acc: r.acc, mode: r.mode, mode2: r.mode2 });
+          try { rememberStumble(r); } catch (e) {}
         }
       } else {
         const a = buildStumbleSnapshot() || lastStumbleSnapshot;
@@ -2165,7 +2687,7 @@
       // Toast only once per finished test (wpm+acc within 20s) — updates stay silent
       const capKey = Math.round(Number(r.wpm) * 100) + '_' + Math.round(Number(r.acc) * 100);
       const now = Date.now();
-      const isRepeat = (capKey === _eaLastCaptureKey && (now - _eaLastCaptureAt) < 20000);
+      const isRepeat = (capKey === _eaLastCaptureKey && (now - _eaLastCaptureAt) < 45000);
       if (!isRepeat) {
         _eaLastCaptureKey = capKey;
         _eaLastCaptureAt = now;
@@ -2195,7 +2717,10 @@
 
       // O(1) append to chart if filters match — never full refilter
       try {
-        if (!isRepeat) appendLiveToCharts(r);
+        if (!isRepeat) {
+          const ok = appendLiveToCharts(r);
+          console.log('[EA] live append result', ok, r.wpm, r.mode, r.type, r.tags, r.timestamp);
+        }
       } catch (e) { console.warn('[EA] live append', e); }
 
       updateBadge();
@@ -2210,7 +2735,7 @@
             }));
           } catch (e) {}
           const tagHint = (r.tags && r.tags.length) ? '' : ' · no tags';
-          showToast('Saved test: ' + Number(r.wpm).toFixed(1) + ' wpm' + st + tagHint, 'success', 2200);
+          showToast('Saved test: ' + Number(r.wpm).toFixed(2) + ' wpm' + st + tagHint, 'success', 2200);
         } catch (e) {}
       }
       // Clear last-good after a successful attach so it cannot bleed into next test
@@ -2372,9 +2897,14 @@
       }
 
       let normalized = allNew.map(normalizeResult);
-      // Attach live-session stumbles (API/CSV lack stumble fields)
+      // Restore per-test stumbles from permanent index, then pending queue
+      normalized = normalized.map(r => applyStumbleIndex(r));
       normalized = applyPendingToResults(normalized);
       const added = await saveResultsBulk(normalized);
+      try {
+        const fixed = await reconcileStumblesLastN(1000);
+        if (fixed && !silent) showToast('Corrected stumble on ' + fixed + ' recent results', 'info', 3000);
+      } catch (e) { console.warn('[EA] reconcile', e); }
       // Second pass: patch any still-missing recent results from pending queue
       try {
         const pending = loadPendingStumbles();
@@ -2509,7 +3039,22 @@
   function applyFilters(results) {
     const now = Date.now();
     // Repair mis-tagged zen/language so mode filters work on old data too
-    let filtered = (results || []).map((r) => repairResultMeta({ ...r }));
+    let filtered = (results || []).map((r) => {
+      const x = repairResultMeta({ ...r });
+      let ts = Number(x.timestamp) || 0;
+      if (ts && ts < 1e12) ts *= 1000;
+      if (!ts || ts < 946684800000) x.timestamp = now;
+      else x.timestamp = ts;
+      return x;
+    }).filter((x) => {
+      if (Number(x.wpm) === 100 && Number(x.acc) === 0) return false;
+      if (x.id && String(x.id).includes('_10000_') && Number(x.wpm) === 100) return false;
+      if (!(Number(x.wpm) > 0)) return false;
+      let ts = Number(x.timestamp) || 0;
+      if (ts && ts < 1e12) ts *= 1000;
+      if (ts && ts < 946684800000) return false;
+      return true;
+    });
 
     if (currentFilters.timePeriod !== 'all') {
       const periods = {
@@ -2678,7 +3223,7 @@
   function createCrosshairPlugin(opts = {}) {
     const leftUnit = opts.leftUnit || '';
     const rightUnit = opts.rightUnit || '%';
-    const leftDecimals = opts.leftDecimals ?? 1;
+    const leftDecimals = opts.leftDecimals ?? 2;
     const rightDecimals = opts.rightDecimals ?? 2;
 
     return {
@@ -3006,7 +3551,7 @@
 
 
 
-  const crosshairPlugin = createCrosshairPlugin({ leftDecimals: 1, rightDecimals: 2, rightUnit: '%' });
+  const crosshairPlugin = createCrosshairPlugin({ leftDecimals: 2, rightDecimals: 2, rightUnit: '%' });
 
 
   let __eaChartLoading = null;
@@ -3293,7 +3838,7 @@
               let idx = (typeof parsedX === 'number' && !isNaN(parsedX))
                 ? Math.round(parsedX)
                 : el.index;
-              // Prefer WPM dataset points only
+              // Any metric (WPM / Acc / Stumble) maps to the same full result
               if (results[idx]) {
                 window.__eaHoveredResult = results[idx];
                 window.__eaHoveredIndex = idx;
@@ -3332,7 +3877,12 @@
                 const realIndex = (typeof x === 'number' && results[Math.round(x)])
                   ? Math.round(x)
                   : (results.length > MAX_POINTS_DRAW ? drawIndexes[items[0].dataIndex] : items[0].dataIndex);
-                return new Date(results[realIndex]?.timestamp || 0).toLocaleString();
+                {
+                  let ts = Number(results[realIndex]?.timestamp) || 0;
+                  if (ts && ts < 1e12) ts *= 1000;
+                  if (!ts || ts < 946684800000) ts = Date.now();
+                  return new Date(ts).toLocaleString();
+                }
               },
               // Suppress per-dataset lines — we always show full metrics below
               label: () => null,
@@ -3349,7 +3899,7 @@
                 const acc = r.acc != null ? Number(r.acc).toFixed(2) + '%' : '—';
                 let stumbleLine = 'Stumble: (not recorded)';
                 if (r.stumblePct != null) {
-                  stumbleLine = `Stumble: ${r.stumbledWords}/${r.totalWords} words (${Number(r.stumblePct).toFixed(1)}%)`;
+                  stumbleLine = `Stumble: ${r.stumbledWords}/${r.totalWords} words (${Number(r.stumblePct).toFixed(2)}%)`;
                 }
                 return [
                   `WPM: ${wpm}`,
@@ -3370,7 +3920,16 @@
             type: 'linear',
             title: { display: true, text: 'Test # (filtered chronological)', color: '#888' },
             ticks: { color: '#888', maxTicksLimit: 12 },
-            grid: { color: 'rgba(255,255,255,0.05)' }
+            grid: { color: 'rgba(255,255,255,0.05)' },
+            // Keep same right gap for last-day (few points) as all-time/week
+            min: results.length ? -0.5 : 0,
+            max: (function () {
+              const n = results.length;
+              if (!n) return 1;
+              // ~4% pad on the right, minimum 2 units so last point isn't on the edge
+              const pad = Math.max(2, Math.ceil(n * 0.04));
+              return (n - 1) + pad;
+            })()
           },
           y: {
             type: 'linear',
@@ -3411,7 +3970,7 @@
           }
         }
       },
-      plugins: [createCrosshairPlugin({ leftDecimals: 1, rightDecimals: 2, rightUnit: '%' }), createWheelZoomPlugin()]
+      plugins: [createCrosshairPlugin({ leftDecimals: 2, rightDecimals: 2, rightUnit: '%' }), createWheelZoomPlugin()]
     });
     try { bindWheelZoomToChart(chartInstance); } catch (e) {}
     try { pinScaleLabels(chartInstance, '#ea-main-frame'); } catch (e) {}
@@ -3423,18 +3982,72 @@
     if (!r) return false;
     try {
       // Always keep full cache in sync (dedupe)
-      if (!window.__eaCachedAll) window.__eaCachedAll = [];
-      const exists = window.__eaCachedAll.some(x =>
-        x.id === r.id ||
-        (Math.abs(Number(x.wpm) - Number(r.wpm)) < 0.05 &&
-         Math.abs((Number(x.timestamp) || 0) - (Number(r.timestamp) || 0)) < 15000)
-      );
-      if (!exists) window.__eaCachedAll.push(r);
+      // Only mutate cache if it already holds the full archive (or a real Apply load).
+      // Never start a 1–N item cache from live captures alone — that hid the 6k history.
+      if (Array.isArray(window.__eaCachedAll) && window.__eaCachedAll.length > 50) {
+        const exists = window.__eaCachedAll.some(x =>
+          x.id === r.id ||
+          (Math.abs(Number(x.wpm) - Number(r.wpm)) < 0.05 &&
+           Math.abs((Number(x.timestamp) || 0) - (Number(r.timestamp) || 0)) < 15000)
+        );
+        if (!exists) window.__eaCachedAll.push(r);
+      } else if (window.__eaEverFiltered) {
+        // User already filtered once — refresh full list in background
+        try {
+          Promise.resolve(getAllResults()).then((all) => {
+            if (Array.isArray(all) && all.length) window.__eaCachedAll = all;
+          }).catch(() => {});
+        } catch (e) {}
+      }
 
-      // Must match last filter settings
+      // Match filters; loose fallback so live tests still appear on graph
       let matches = true;
-      try { matches = applyFilters([r]).length > 0; } catch (e) { matches = true; }
-      if (!matches) return false;
+      try {
+        matches = applyFilters([r]).length > 0;
+        if (!matches && Array.isArray(window.__eaLastFiltered) && window.__eaLastFiltered.length) {
+          const sample = window.__eaLastFiltered[window.__eaLastFiltered.length - 1];
+          const sameMode = sample && r.mode && sample.mode === r.mode;
+          const rTags = (r.tags || []).map(String);
+          const sTags = (sample.tags || []).map(String);
+          const tagOk = !rTags.length || !sTags.length || rTags.some(t => sTags.includes(t));
+          if (sameMode && tagOk) matches = true;
+        }
+      } catch (e) { matches = true; }
+      if (!matches) {
+        // Last resort: tag name overlap with selected filters (eclipse etc.)
+        try {
+          const nameMap = window.__eaTagNameMap || {};
+          const sel = (currentFilters.tags || []).map(String);
+          const rTags = (r.tags || []).map(String);
+          const rNames = rTags.map(t => String(nameMap[t] || t).toLowerCase());
+          const selNames = sel.map(t => String(nameMap[t] || t).toLowerCase());
+          if (sel.length && rNames.some(n => selNames.includes(n) || sel.includes(n))) {
+            matches = true;
+          }
+          // If only tag filter is active and mode is present, allow
+          if (!matches && r.mode && currentFilters.mode && currentFilters.mode[r.mode] !== false) {
+            if (!sel.length) matches = true;
+          }
+        } catch (e) {}
+      }
+      if (!matches) {
+        console.log('[EA] live saved, filters mismatch', {
+          mode: r.mode, type: r.type, tags: r.tags, wpm: r.wpm,
+          filterTags: currentFilters.tags, filterModes: currentFilters.mode
+        });
+        return false;
+      }
+      // Always force a real wall-clock timestamp before graph/DB use
+      {
+        let ts = Number(r.timestamp) || 0;
+        if (ts && ts < 1e12) ts *= 1000;
+        if (!ts || ts < 946684800000 || ts > Date.now() + 60000) {
+          r.timestamp = Date.now();
+        } else {
+          r.timestamp = ts;
+        }
+      }
+      console.log('[EA] live append try', r.wpm, r.mode, r.type, r.tags, 'stumble', r.stumblePct, 'ts', r.timestamp);
 
       if (!window.__eaPendingLive) window.__eaPendingLive = [];
       // dedupe pending
@@ -3442,6 +4055,16 @@
           (Math.abs(Number(x.wpm) - Number(r.wpm)) < 0.05 &&
            Math.abs((Number(x.timestamp) || 0) - (Number(r.timestamp) || 0)) < 15000))) {
         window.__eaPendingLive.push(r);
+      }
+
+      // CRITICAL: tooltip reads results[realIndex].timestamp from __eaLastFiltered.
+      // Must push r here or the new point shows 1/1/1970.
+      if (!window.__eaLastFiltered) window.__eaLastFiltered = [];
+      if (!window.__eaLastFiltered.some(x =>
+          x.id === r.id ||
+          (Math.abs(Number(x.wpm) - Number(r.wpm)) < 0.05 &&
+           Math.abs((Number(x.timestamp) || 0) - (Number(r.timestamp) || 0)) < 15000))) {
+        window.__eaLastFiltered.push(r);
       }
 
       if (!chartInstance || !chartInstance.data || !chartInstance.data.datasets) {
@@ -3460,17 +4083,14 @@
         const last = wpmDs.data[wpmDs.data.length - 1];
         x = (last && last.x != null) ? last.x + 1 : wpmDs.data.length;
       } else if (window.__eaLastFiltered) {
-        x = window.__eaLastFiltered.length;
+        x = Math.max(0, window.__eaLastFiltered.length - 1);
       }
       if (wpmDs) wpmDs.data.push({ x, y: r.wpm });
       if (accDs) accDs.data.push({ x, y: r.acc == null ? null : Math.max(90, r.acc) });
       if (stDs && r.stumblePct != null) stDs.data.push({ x, y: r.stumblePct });
 
-      // Quick update last point of rolling averages (recompute from lastFiltered + r)
+      // Rolling averages INCLUDE the new point (already in __eaLastFiltered)
       try {
-        if (!window.__eaLastFiltered) window.__eaLastFiltered = [];
-        window.__eaLastFiltered.push(r);
-        const n = window.__eaLastFiltered.length;
         const slice10 = window.__eaLastFiltered.slice(-10);
         const slice100 = window.__eaLastFiltered.slice(-100);
         const avg = (arr, key) => {
@@ -3550,16 +4170,41 @@
         'Mode: ' + (r.mode || '') + ' ' + (r.mode2 != null ? r.mode2 : '');
       if (!confirm(msg)) return;
       try {
-        await deleteResultById(r.id);
-        if (Array.isArray(window.__eaCachedAll)) {
-          window.__eaCachedAll = window.__eaCachedAll.filter((x) => x.id !== r.id);
+        const rid = r.id;
+        const rts = Number(r.timestamp) || 0;
+        const rwpm = Number(r.wpm);
+        // One result record = WPM + Acc + Stumble — delete the whole thing
+        try { await deleteResultById(rid); } catch (e1) {
+          console.warn('[EA] deleteResultById', e1);
         }
-        if (Array.isArray(window.__eaLastFiltered)) {
-          window.__eaLastFiltered = window.__eaLastFiltered.filter((x) => x.id !== r.id);
+        const isSame = (x) => {
+          if (!x) return false;
+          if (rid != null && x.id != null && String(x.id) === String(rid)) return true;
+          if (rts && Math.abs((Number(x.timestamp) || 0) - rts) < 2000 &&
+              Math.abs(Number(x.wpm) - rwpm) < 0.05) return true;
+          return false;
+        };
+        for (const key of ['__eaCachedAll', '__eaLastFiltered', '__eaFirstOpenSlice']) {
+          if (Array.isArray(window[key])) window[key] = window[key].filter((x) => !isSame(x));
         }
+        // Destroy charts so leftover acc/stumble dots cannot linger
+        try {
+          if (chartInstance) { chartInstance.destroy(); chartInstance = null; }
+        } catch (e) {}
+        try {
+          if (typeof dailyChart !== 'undefined' && dailyChart) { dailyChart.destroy(); dailyChart = null; }
+        } catch (e) {}
+        try {
+          if (typeof monthlyChart !== 'undefined' && monthlyChart) { monthlyChart.destroy(); monthlyChart = null; }
+        } catch (e) {}
+        try {
+          document.querySelectorAll('#ea-root canvas').forEach((c) => {
+            try { if (c.__eaChart) { c.__eaChart.destroy(); c.__eaChart = null; } } catch (e) {}
+          });
+        } catch (e) {}
         window.__eaHoveredResult = null;
         window.__eaHoveredIndex = null;
-        try { showToast('Result deleted'); } catch (e2) {}
+        try { showToast('Result deleted (wpm + acc + stumble)'); } catch (e2) {}
         window.__eaDirtyCharts = false;
         await renderArchive();
       } catch (err) {
@@ -4142,8 +4787,14 @@
         window.__eaEverFiltered = true;
         window.__eaPanelReady = true;
         collectFiltersFromUI();
-        if (!window.__eaCachedAll) {
-          try { window.__eaCachedAll = await getAllResults(); } catch (e) {}
+        // Always reload from IndexedDB so live-saved tests appear
+        try {
+          window.__eaCachedAll = await getAllResults();
+          console.log('[EA] Apply reloaded', window.__eaCachedAll.length, 'from DB');
+        } catch (e) {
+          if (!window.__eaCachedAll) {
+            try { window.__eaCachedAll = await getAllResults(); } catch (e2) {}
+          }
         }
         // Harvest every language/funbox seen in full history → persistent lists
         try {
@@ -4931,7 +5582,7 @@
           {
             label: accLabel,
             data: points.map((d, i) => ({ x: i, y: d.avgAcc == null ? null : Math.max(90, d.avgAcc) })),
-
+            
             backgroundColor: 'rgba(231, 111, 81, 0.85)',
             pointRadius: aggDotRadius,
             pointHoverRadius: dotHoverRadius,
@@ -5020,7 +5671,7 @@
                   `WPM: ${Number(d.avgWpm).toFixed(2)}`,
                   `Accuracy: ${Number(d.avgAcc).toFixed(2)}%`,
                   d.avgStumble != null
-                    ? `Stumble: ${Number(d.avgStumble).toFixed(1)}% (${d.stumbleCount || 0}/${d.count} tests with data)`
+                    ? `Stumble: ${Number(d.avgStumble).toFixed(2)}% (${d.stumbleCount || 0}/${d.count} tests with data)`
                     : 'Stumble: (not recorded)'
                 ];
                 if (mode === 'day') {
@@ -5038,7 +5689,7 @@
           x: {
             type: 'linear',
             min: -0.5,
-            max: Math.max(points.length - 0.5, 0.5),
+            max: Math.max(points.length - 1 + Math.max(2, Math.ceil(points.length * 0.04)), 2),
             title: { display: true, text: xTitle, color: '#888' },
             ticks: uniqueIndexTicks(labels),
             grid: { color: 'rgba(255,255,255,0.05)' }
@@ -5076,7 +5727,7 @@
           }
         }
       },
-      plugins: [createCrosshairPlugin({ leftDecimals: 1, rightDecimals: 2, rightUnit: '%' }), createWheelZoomPlugin()]
+      plugins: [createCrosshairPlugin({ leftDecimals: 2, rightDecimals: 2, rightUnit: '%' }), createWheelZoomPlugin()]
     });
     // Default: show the latest days/months (scroll fully right)
     requestAnimationFrame(() => {
@@ -5318,25 +5969,25 @@
                 if (d.block === 1) {
                   const lines = [
                     `Baseline (plotted at 0)`,
-                    `Block avg WPM: ${d.avgWpm.toFixed(1)}`,
+                    `Block avg WPM: ${d.avgWpm.toFixed(2)}`,
                     `Block avg Acc: ${d.avgAcc.toFixed(2)}%`,
                     `Tests in block: ${d.count}`,
                     `Hours in block: ${d.hoursInBlock.toFixed(2)}`
                   ];
                   if (d.avgStumble != null) {
-                    lines.splice(3, 0, `Block avg Stumble: ${d.avgStumble.toFixed(1)}%`);
+                    lines.splice(3, 0, `Block avg Stumble: ${d.avgStumble.toFixed(2)}%`);
                   }
                   return lines;
                 }
                 const lines = [
-                  `Δ WPM: ${d.deltaWpm >= 0 ? '+' : ''}${d.deltaWpm.toFixed(2)}  (${d.prevWpm.toFixed(1)} → ${d.avgWpm.toFixed(1)})`,
+                  `Δ WPM: ${d.deltaWpm >= 0 ? '+' : ''}${d.deltaWpm.toFixed(2)}  (${d.prevWpm.toFixed(2)} → ${d.avgWpm.toFixed(2)})`,
                   `Δ Acc: ${d.deltaAcc >= 0 ? '+' : ''}${d.deltaAcc.toFixed(2)}%  (${d.prevAcc.toFixed(2)} → ${d.avgAcc.toFixed(2)})`,
                   `Tests in block: ${d.count}`,
                   `Hours in block: ${d.hoursInBlock.toFixed(2)}`
                 ];
                 if (d.deltaStumble != null && d.prevStumble != null && d.avgStumble != null) {
                   lines.splice(2, 0,
-                    `Δ Stumble: ${((d.avgStumble - d.prevStumble) >= 0 ? '+' : '')}${(d.avgStumble - d.prevStumble).toFixed(2)}%  (${d.prevStumble.toFixed(1)} → ${d.avgStumble.toFixed(1)})`
+                    `Δ Stumble: ${((d.avgStumble - d.prevStumble) >= 0 ? '+' : '')}${(d.avgStumble - d.prevStumble).toFixed(2)}%  (${d.prevStumble.toFixed(2)} → ${d.avgStumble.toFixed(2)})`
                   );
                 }
                 return lines;
@@ -5348,7 +5999,7 @@
           x: {
             type: 'linear',
             min: -0.5,
-            max: series.length - 0.5,
+            max: series.length - 1 + Math.max(2, Math.ceil(series.length * 0.04)),
             title: { display: true, text: 'Block # (each ≈ 10 h effective typing)', color: '#888' },
             ticks: uniqueIndexTicks(labels),
             grid: { color: 'rgba(255,255,255,0.05)' }
@@ -5410,11 +6061,12 @@
         const everything = await getAllResults();
         all = everything.slice().sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)).slice(-10);
       }
-    } else if (window.__eaCachedAll && window.__eaCachedAll.length) {
+    } else if (window.__eaCachedAll && window.__eaCachedAll.length > 50) {
       all = window.__eaCachedAll;
     } else {
       all = await getAllResults();
       window.__eaCachedAll = all;
+      console.log('[EA] render loaded full archive', all.length);
     }
     // Repair mangled languages + re-attach pending stumbles where missing
     try {
@@ -5442,9 +6094,9 @@
 
     const stats = document.getElementById('ea-stats');
     if (stats) {
-      const avgWpm = filtered.length ? Number(weightedMeanFromResults(filtered, r => r.wpm)).toFixed(1) : '–';
+      const avgWpm = filtered.length ? Number(weightedMeanFromResults(filtered, r => r.wpm)).toFixed(2) : '–';
       const avgAcc = filtered.length ? Number(weightedMeanFromResults(filtered, r => r.acc)).toFixed(2) : '–';
-      const best = filtered.length ? Math.max(...filtered.map(r => r.wpm)).toFixed(1) : '–';
+      const best = filtered.length ? Math.max(...filtered.map(r => r.wpm)).toFixed(2) : '–';
       stats.innerHTML = `
         <span>Showing <b>${filtered.length.toLocaleString()}</b> / ${all.length.toLocaleString()} results</span>
         <span>Avg WPM: <b>${avgWpm}</b></span>
@@ -5486,9 +6138,13 @@
           results = Array.isArray(json) ? json : (json.results || json.data || []);
         }
         let normalized = results.map(normalizeResult);
-        // Attach any pending live-session stumbles (CSV has no stumble column)
+        normalized = normalized.map(r => applyStumbleIndex(r));
         normalized = applyPendingToResults(normalized);
         const added = await saveResultsBulk(normalized);
+        try {
+          const fixed = await reconcileStumblesLastN(1000);
+          if (fixed) showToast('Corrected stumble on ' + fixed + ' recent results', 'info', 3000);
+        } catch (e) {}
         // Second pass: patch already-stored recent results from pending queue
         try {
           const s = buildStumbleSnapshot();
@@ -5699,7 +6355,41 @@
       setTimeout(() => syncResults({ silent: true }), 4000);
     }
 
-    console.log('[Monkeytype Eternal Archive] v2.2.10 ready — mode/type + migrate');
+    const _rec = (n) => reconcileStumblesLastN(n || 1000);
+    try { window.__eaReconcileStumbles = _rec; } catch (e) {}
+    try { if (typeof unsafeWindow !== 'undefined') unsafeWindow.__eaReconcileStumbles = _rec; } catch (e) {}
+    try { globalThis.__eaReconcileStumbles = _rec; } catch (e) {}
+  
+    // Auto-sync every 6h only when idle (no typing / no test for 60s)
+    if (!window.__eaIdleSyncScheduled) {
+      window.__eaIdleSyncScheduled = true;
+      let lastActivity = Date.now();
+      const bump = () => { lastActivity = Date.now(); };
+      ['keydown','mousemove','click','scroll'].forEach(ev => {
+        try { document.addEventListener(ev, bump, { passive: true, capture: true }); } catch (e) {}
+      });
+      const SIX_H = 6 * 60 * 60 * 1000;
+      const lastSyncKey = 'ea_last_auto_sync_ts';
+      setInterval(async () => {
+        try {
+          const last = Number(localStorage.getItem(lastSyncKey) || 0);
+          if (Date.now() - last < SIX_H) return;
+          if (Date.now() - lastActivity < 60000) return; // user active in last minute
+          if (document.querySelector('#words .word.active, #wordsInput, .pageTest #words')) {
+            // in a test
+            const active = document.querySelector('#words .word.active');
+            if (active) return;
+          }
+          if (typeof isTestActive === 'function' && isTestActive()) return;
+          localStorage.setItem(lastSyncKey, String(Date.now()));
+          console.log('[EA] idle auto-sync starting');
+          await syncResults({ silent: true });
+          try { await reconcileStumblesLastN(1000); } catch (e) {}
+        } catch (e) { console.warn('[EA] idle sync', e); }
+      }, 60000); // check every minute
+    }
+
+  console.log('[Monkeytype Eternal Archive] v2.2.31 ready — mode/type + migrate');
   }
 
   if (document.readyState === 'loading') {
@@ -8890,13 +9580,30 @@
 
   function loadIntervals() {
     try {
-      const o = JSON.parse(GM_getValue(STORAGE_INTERVALS, '{}') || '{}') || {};
-      // Drop lucky-press artifacts (< 10ms) from older versions
+      let raw = GM_getValue(STORAGE_INTERVALS, '{}') || '{}';
+      if (typeof raw !== 'string') raw = '{}';
+      const o = JSON.parse(raw) || {};
+      let dropped = 0;
       for (const k of Object.keys(o)) {
-        if (typeof o[k] !== 'number' || o[k] < 10 || o[k] > 800) delete o[k];
+        let v = o[k];
+        if (typeof v === 'string') v = parseFloat(v);
+        if (typeof v !== 'number' || !isFinite(v) || v < 10 || v > 800) {
+          delete o[k];
+          dropped++;
+          continue;
+        }
+        o[k] = v;
+      }
+      if (dropped) {
+        console.warn('[KeyConf] purged', dropped, 'bad interval records');
+        try { GM_setValue(STORAGE_INTERVALS, JSON.stringify(o)); } catch (e) {}
       }
       return o;
-    } catch (e) { return {}; }
+    } catch (e) {
+      console.warn('[KeyConf] interval DB corrupt — reset', e);
+      try { GM_setValue(STORAGE_INTERVALS, '{}'); } catch (e2) {}
+      return {};
+    }
   }
   function saveIntervals() { GM_setValue(STORAGE_INTERVALS, JSON.stringify(intervalBest)); }
 
@@ -9084,18 +9791,36 @@
   }
 
   function isTestActive() {
-    if (isResultVisible()) return false;
+    // Zen: ignore spam
+    try {
+      if (document.querySelector('#words.zen, .pageTest.zen, body.zen')) return false;
+    } catch (e) {}
     const words = document.getElementById('words') || document.querySelector('#words');
-    if (!words) return false;
-    if (words.classList.contains('hidden')) return false;
-    const st = getComputedStyle(words);
-    if (st.display === 'none' || st.visibility === 'hidden') return false;
-    if (document.querySelector('#words .word.active')) return true;
-    if (document.querySelectorAll('#words letter, #words .letter, #words .word').length > 0) return true;
+    const input = document.querySelector('#wordsInput');
+    const wordsLive = !!(words && words.querySelector('.word') && words.offsetHeight > 0);
+    // Result only when WPM score is painted
+    let resultDone = false;
+    try {
+      const r = document.querySelector('#result');
+      if (r && !r.classList.contains('hidden')) {
+        const st = window.getComputedStyle(r);
+        if (st.display !== 'none') {
+          const wpmEl = r.querySelector('.group.wpm .bottom, .wpm .bottom');
+          const wpmTxt = (wpmEl && wpmEl.textContent || '').trim();
+          if (wpmTxt && /\d/.test(wpmTxt) && r.offsetHeight > 40) resultDone = true;
+        }
+      }
+      if (document.getElementById('resultWordsHistory') && resultDone) resultDone = true;
+    } catch (e) {}
+    if (resultDone) return false;
+    if (input && document.activeElement === input) return true;
+    if (wordsLive) return true;
+    if (session && session.started && !session._finalized && session.keys && session.keys.length) {
+      const last = session.keys[session.keys.length - 1];
+      if (last && Date.now() - last.ts < 4000) return true;
+    }
     return false;
   }
-
-
   function getDomTypingPosition() {
     const words = [...document.querySelectorAll('#words .word')];
     if (!words.length) return null;
@@ -9301,7 +10026,8 @@
   function onKeyUpSlot(e) {
     if (!settings.enabled) return;
     if (!session) return;
-    if (!isTestActive()) return;
+    const midSession = session.started && !session._finalized && (session.keys||[]).length > 0;
+    if (!isTestActive() && !midSession) return;
     requestAnimationFrame(() => {
       try { syncSlotTimestampsFromDom(); } catch (err) {}
     });
@@ -9309,16 +10035,28 @@
 
   function onKeyDown(e) {
     if (!settings.enabled) return;
-    if (!isTestActive()) return;
+    // Allow recording when mid-session even if focus flickered
+    const midSession = session && session.started && !session._finalized && (session.keys||[]).length > 0;
+    if (!isTestActive() && !midSession) return;
     // Extra zen guard
     if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      // Defer reset so finalize can finish on the result screen first
+      // Quick restart: finalize once if result is showing, then always reset session
       const snap = session;
+      const onResult = !!(document.getElementById('resultWordsHistory') ||
+        document.querySelector('#result .group.wpm .bottom, .group.wpm .bottom'));
+      if (onResult && snap && !snap._finalized &&
+          ((snap.keys && snap.keys.length) || (snap.typeBuf && snap.typeBuf.length))) {
+        try {
+          lastResultKey = '';
+          window.__kcFinalizePending = null;
+          finalizeTest('enter-restart');
+        } catch (err) { console.warn('[KeyConf] enter finalize', err); }
+      }
       setTimeout(() => {
-        if (session === snap && (!isResultVisible() || (session && session._finalized))) {
+        if (session === snap || (session && snap && session.started === snap.started)) {
           resetSession('restart');
         }
-      }, 1500);
+      }, onResult ? 300 : 50);
       return;
     }
     if (['Shift','Control','Alt','Meta','CapsLock','Tab','Escape','ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)) return;
@@ -9967,6 +10705,11 @@
       console.warn('[KeyConf] finalize: no session');
       return;
     }
+    // Prevent UI from showing the previous test while we recompute
+    // (only clear if this is a real new finalize, not a no-op)
+    if (!session._finalized) {
+      try { window.__mtKeyConfLast = { at: new Date().toISOString(), pending: true }; } catch (e) {}
+    }
     console.log('[KeyConf] finalize start keys=', (session.keys||[]).length,
       'typeBuf=', (session.typeBuf||[]).length, 'finalized=', !!session._finalized);
     if (!session.keys) session.keys = [];
@@ -10195,8 +10938,9 @@
   function theoreticalBestWpmFromTest(thisTestIntervals, thisTestByPair, sessionKeys, charCount) {
     if (!sessionKeys || sessionKeys.length < 2) return null;
 
-    const firstTs = sessionKeys[0].ts;
-    const lastTs = sessionKeys[sessionKeys.length - 1].ts;
+    const firstTs = Number(sessionKeys[0].ts) || 0;
+    const lastTs = Number(sessionKeys[sessionKeys.length - 1].ts) || 0;
+    if (!firstTs || !lastTs || lastTs <= firstTs) return null;
     // Always use real key-span / site time — never digraph sum (can over/under count)
     let realMs = Math.max(1, lastTs - firstTs);
     const siteMs = parseSiteTestTimeMs();
@@ -10213,26 +10957,28 @@
       if (seenOrder.has(ord)) continue;
       seenOrder.add(ord);
 
-      // Lucky presses (< MIN_DIGRAPH_MS): show only, never use as best or save
+      // Lucky presses: show only, never save as record or credit WPM
       if (tr.isLucky || tr.interval < MIN_DIGRAPH_MS) {
         replacements.push({
-          order: ord,
-          pair: tr.pair,
-          thisMs: tr.interval,
-          bestMs: tr.interval,
-          saved: 0,
-          source: 'lucky press',
-          wordIdx: tr.wordIdx,
-          letterIdx: tr.letterIdx,
-          flatIdx: ord
+          order: ord, pair: tr.pair, thisMs: tr.interval, bestMs: tr.interval,
+          saved: 0, source: 'lucky press',
+          wordIdx: tr.wordIdx, letterIdx: tr.letterIdx, flatIdx: ord
+        });
+        continue;
+      }
+      // Pauses (> MAX): show only — never credit "saved" time vs a normal digraph
+      if (tr.isPause || tr.interval > MAX_DIGRAPH_MS) {
+        replacements.push({
+          order: ord, pair: tr.pair, thisMs: tr.interval, bestMs: tr.interval,
+          saved: 0, source: 'pause',
+          wordIdx: tr.wordIdx, letterIdx: tr.letterIdx, flatIdx: ord
         });
         continue;
       }
 
       let better = tr.interval;
-      let source = (tr.isPause || tr.interval > MAX_DIGRAPH_MS) ? 'pause' : 'this';
+      let source = 'this';
       const inTestBest = thisTestByPair[tr.pair];
-      // Only use in-test/historical bests that are usable (>= MIN, <= MAX)
       if (inTestBest != null && inTestBest < better &&
           inTestBest >= MIN_DIGRAPH_MS && inTestBest <= MAX_DIGRAPH_MS) {
         better = inTestBest; source = 'in-test';
@@ -10433,8 +11179,21 @@
     let reps = last.replacements || (last.bestPossibleWpm && last.bestPossibleWpm.replacements) || [];
     if (!Array.isArray(reps)) reps = [];
     if (!reps.length) {
-      box.innerHTML = '<div style="padding:4px 0">No digraph replacements on last test. Finish a test first.</div>';
-      return;
+      // Result may be up but finalize missed — try once more
+      try {
+        if (typeof isResultVisible === 'function' && isResultVisible() && session && !session._finalized) {
+          lastResultKey = '';
+          window.__kcFinalizePending = null;
+          if (typeof checkResult === 'function') checkResult();
+        }
+      } catch (e) {}
+      const last2 = window.__mtKeyConfLast || {};
+      reps = last2.replacements || (last2.bestPossibleWpm && last2.bestPossibleWpm.replacements) || [];
+      if (!Array.isArray(reps)) reps = [];
+      if (!reps.length) {
+        box.innerHTML = '<div style="padding:4px 0">No digraph replacements on last test. Finish a test first.</div>';
+        return;
+      }
     }
     const pretty = (p) => String(p).replace(/ /g, 'spc').replace(/\u2192/g, '→');
     const pad = (s, n) => {
@@ -10922,14 +11681,38 @@
 
   function checkResult() {
     if (!settings.enabled) return;
-    const result = document.getElementById('result');
-    if (!result || result.classList.contains('hidden')) return;
-    if (!result.offsetParent && getComputedStyle(result).display === 'none') return;
-    const wpmEl = result.querySelector('.group.wpm .bottom, .wpm .bottom');
-    const accEl = document.querySelector('#result .group.acc .bottom, .group.acc .bottom');
-    const wpmTxt = String((wpmEl && wpmEl.textContent) || '').trim();
-    const accTxt = String((accEl && accEl.textContent) || '').trim();
-    if (!wpmTxt && !accTxt) return;
+    const hasHist = !!(document.getElementById('resultWordsHistory') ||
+      document.querySelector('#resultWordsHistory, .resultWordsHistory'));
+    const result = document.getElementById('result') || document.querySelector('.pageResult #result, #result');
+    if (!result && !hasHist) return;
+    if (result) {
+      try {
+        const st = window.getComputedStyle(result);
+        if (st.display === 'none' && !hasHist) return;
+      } catch (e) {}
+    }
+    // Prefer shared WPM reader (handles MT DOM changes)
+    let wpmTxt = '';
+    let accTxt = '';
+    try {
+      if (typeof readWpmFromResultDOM === 'function') {
+        const n = readWpmFromResultDOM();
+        if (n) wpmTxt = String(n);
+      }
+    } catch (e) {}
+    if (!wpmTxt && result) {
+      const wpmEl = result.querySelector('.group.wpm .bottom, .wpm .bottom, .group.wpm');
+      const m = String((wpmEl && wpmEl.textContent) || '').match(/(\d+(?:\.\d+)?)/);
+      if (m) wpmTxt = m[1];
+    }
+    if (result) {
+      const accEl = result.querySelector('.group.acc .bottom, .group.acc .bottom, .group.acc');
+      const m = String((accEl && accEl.textContent) || '').match(/(\d+(?:\.\d+)?)/);
+      if (m) accTxt = m[1];
+    }
+    if (!wpmTxt && !accTxt && !hasHist) return;
+    if (!wpmTxt) wpmTxt = '0';
+    if (!accTxt) accTxt = '0';
     // Include session start so two tests with same wpm/acc still finalize separately
     const sessId = (session && session.started) ? String(session.started) : 'nosess';
     const key = wpmTxt + '_' + accTxt + '_' + sessId;
@@ -10941,21 +11724,45 @@
     // Need session keystrokes (skip only if already finalized this same key)
     if (!session) return;
     if (session._finalized) return;
-    if (!(session.keys && session.keys.length) && !(session.typeBuf && session.typeBuf.length)) {
-      console.warn('[KeyConf] result showing but no keys recorded — isTestActive may have failed during typing');
+    if (!(session.keys && session.keys.length) && !(session.typeBuf && session.typeBuf.length) &&
+        !(session.slotTsLive && session.slotTsLive.length >= 2)) {
+      console.warn('[KeyConf] result showing but no keys/slots recorded — enable KeyConf BEFORE the test');
       return;
     }
-    // Lock immediately — stops setInterval from queueing dozens of finalizes
-    lastResultKey = key;
+    console.log('[KeyConf] checkResult ok wpm=', wpmTxt, 'keys=', (session.keys||[]).length,
+      'typeBuf=', (session.typeBuf||[]).length, 'hist=', !!hasHist);
+    // Do NOT lock lastResultKey until finalize succeeds (history can load late)
+    if (window.__kcFinalizePending === key) return;
+    window.__kcFinalizePending = key;
     const attempt = (n) => {
-      if (window.__mtKeyConfLast && window.__mtKeyConfLast.resultKey === key) return;
+      if (window.__mtKeyConfLast && window.__mtKeyConfLast.resultKey === key) {
+        lastResultKey = key;
+        window.__kcFinalizePending = null;
+        return;
+      }
+      if (session && session._finalized) {
+        lastResultKey = key;
+        window.__kcFinalizePending = null;
+        return;
+      }
       try { finalizeTest(key); } catch (e) { console.warn('[KeyConf] finalize error', e); }
       try { refreshPanel(); } catch (e) {}
-      if (n < 2 && !(window.__mtKeyConfLast && window.__mtKeyConfLast.resultKey === key)) {
+      if (window.__mtKeyConfLast && window.__mtKeyConfLast.resultKey === key) {
+        lastResultKey = key;
+        window.__kcFinalizePending = null;
+        return;
+      }
+      // Retry up to ~5s — resultWordsHistory often appears after the WPM counters
+      if (n < 12) {
         setTimeout(() => attempt(n + 1), 400);
+      } else {
+        console.warn('[KeyConf] finalize gave up after retries for', key);
+        window.__kcFinalizePending = null;
+        // Allow checkResult to try again later if user stays on result
+        lastResultKey = '';
       }
     };
-    setTimeout(() => attempt(0), 250);
+    setTimeout(() => attempt(0), 200);
   }
 
   function toast(msg) {
@@ -11379,5 +12186,44 @@
     } catch (e) {}
   }, 400);
 
-  console.log('[KeyConf] v2.2.10 ready \u2014', WORD_BANKS.reduce((n,b)=>n+b.length,0), 'words in', WORD_BANKS.length, 'shards');
+  
+  // ---- Debug helpers (console) ----
+  window.__kcDebugResult = function () {
+    const r = document.getElementById('result');
+    const hist = document.getElementById('resultWordsHistory');
+    const wpm = (typeof readWpmFromResultDOM === 'function') ? readWpmFromResultDOM() : null;
+    const info = {
+      hasResult: !!r,
+      resultHidden: r ? r.classList.contains('hidden') : null,
+      resultDisplay: r ? getComputedStyle(r).display : null,
+      resultHeight: r ? r.offsetHeight : null,
+      hasHist: !!hist,
+      histWords: hist ? hist.querySelectorAll('.word').length : 0,
+      wpmRead: wpm,
+      wpmBottomText: (r && r.querySelector('.group.wpm .bottom')) ? r.querySelector('.group.wpm .bottom').textContent : null,
+      wpmGroupHTML: (r && r.querySelector('.group.wpm')) ? r.querySelector('.group.wpm').innerHTML.slice(0, 300) : null,
+      keyConfEnabled: !!(typeof settings !== 'undefined' && settings && settings.enabled),
+      sessionKeys: (typeof session !== 'undefined' && session && session.keys) ? session.keys.length : 0,
+      typeBuf: (typeof session !== 'undefined' && session && session.typeBuf) ? session.typeBuf.length : 0,
+      finalized: !!(typeof session !== 'undefined' && session && session._finalized),
+      lastKey: typeof lastResultKey !== 'undefined' ? lastResultKey : null,
+      lastData: window.__mtKeyConfLast ? {
+        at: window.__mtKeyConfLast.at,
+        replacements: (window.__mtKeyConfLast.replacements || []).length,
+        pending: !!window.__mtKeyConfLast.pending
+      } : null
+    };
+    console.log('[KeyConf DEBUG]', info);
+    return info;
+  };
+  window.__eaDebugCapture = function () {
+    const wpm = (typeof readWpmFromResultDOM === 'function') ? readWpmFromResultDOM() : null;
+    let dom = null;
+    try { dom = (typeof readResultFromDOM === 'function') ? readResultFromDOM() : null; } catch (e) { dom = { error: String(e) }; }
+    const info = { wpm, dom, hist: !!document.getElementById('resultWordsHistory') };
+    console.log('[EA DEBUG]', info);
+    return info;
+  };
+
+console.log('[KeyConf] v2.2.31 ready \u2014', WORD_BANKS.reduce((n,b)=>n+b.length,0), 'words in', WORD_BANKS.length, 'shards');
 })();
