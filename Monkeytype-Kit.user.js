@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Monkeytype Kit Full (Archive + Jail + Hotlist + Dictation + Key Confidence)
 // @namespace    https://monkeytype.com/kit
-// @version      2.2.31
+// @version      2.2.32
 // @description  Bundle: Eternal Archive, Jail, Hotlist, Dictation, Key Confidence + Best WPM. Single Ape Key in Archive panel.
 // @author       kitkat + Grok
 // @match        https://monkeytype.com/*
@@ -3647,16 +3647,23 @@
       return;
     }
 
-    // Downsample scatter points if too many (keep averages exact)
+    // Downsample scatter if too many — but ALWAYS keep the full recent tail
+    // so last-day tests never vanish on all-time / 3-month views.
     let drawIndexes = results.map((_, i) => i);
     if (results.length > MAX_POINTS_DRAW) {
-      const step = results.length / MAX_POINTS_DRAW;
+      const TAIL = Math.min(400, results.length); // last 400 tests drawn 1:1
+      const headBudget = Math.max(100, MAX_POINTS_DRAW - TAIL);
+      const headEnd = results.length - TAIL;
       drawIndexes = [];
-      for (let i = 0; i < MAX_POINTS_DRAW; i++) drawIndexes.push(Math.floor(i * step));
-      // always include last point
-      if (drawIndexes[drawIndexes.length - 1] !== results.length - 1) {
-        drawIndexes.push(results.length - 1);
+      if (headEnd > 0) {
+        const step = headEnd / headBudget;
+        for (let i = 0; i < headBudget; i++) {
+          drawIndexes.push(Math.min(headEnd - 1, Math.floor(i * step)));
+        }
       }
+      for (let i = headEnd; i < results.length; i++) drawIndexes.push(i);
+      // unique sorted
+      drawIndexes = [...new Set(drawIndexes)].sort((a, b) => a - b);
     }
 
     const wpmData = results.map(r => r.wpm);
@@ -6389,7 +6396,7 @@
       }, 60000); // check every minute
     }
 
-  console.log('[Monkeytype Eternal Archive] v2.2.31 ready — mode/type + migrate');
+  console.log('[Monkeytype Eternal Archive] v2.2.32 ready — mode/type + migrate');
   }
 
   if (document.readyState === 'loading') {
@@ -12225,5 +12232,5 @@
     return info;
   };
 
-console.log('[KeyConf] v2.2.31 ready \u2014', WORD_BANKS.reduce((n,b)=>n+b.length,0), 'words in', WORD_BANKS.length, 'shards');
+console.log('[KeyConf] v2.2.32 ready \u2014', WORD_BANKS.reduce((n,b)=>n+b.length,0), 'words in', WORD_BANKS.length, 'shards');
 })();
