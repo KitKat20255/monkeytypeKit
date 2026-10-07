@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Monkeytype Kit Full (Archive + Jail + Hotlist + Dictation + Key Confidence)
 // @namespace    https://monkeytype.com/kit
-// @version      2.2.32
+// @version      2.2.33
 // @description  Bundle: Eternal Archive, Jail, Hotlist, Dictation, Key Confidence + Best WPM. Single Ape Key in Archive panel.
 // @author       kitkat + Grok
 // @match        https://monkeytype.com/*
@@ -451,7 +451,7 @@
     savePendingStumbles(filtered);
   }
 
-  
+
   /** Fallback when MT no longer uses .group classes — parse #result.innerText */
   function scrapeResultFromInnerText() {
     const root = document.querySelector('#result') || document.querySelector('.pageResult');
@@ -476,7 +476,7 @@
     if (!block || block.length < 10) return null;
 
     const out = {};
-    // Collect all wpm candidates; NEVER take a number that is the "100" from "100%" 
+    // Collect all wpm candidates; NEVER take a number that is the "100" from "100%"
     const allWpm = [];
     const re = /\bwpm\b([^\d%]{0,15})(\d+(?:\.\d+)?)(\s*%)?/gi;
     let m;
@@ -534,7 +534,7 @@
     return null;
   }
 
-  
+
   function readWpmFromResultDOM() {
     try {
       const parseNum = (t, min, max) => {
@@ -600,7 +600,7 @@
     }
   }
 
-  
+
   function readNumFromResultGroup(groupClass) {
     try {
       const parseNum = (t) => {
@@ -657,7 +657,7 @@
     } catch (e) { return null; }
   }
 
-  
+
   function readResultGroupMap() {
     // Parse #result .group blocks: { "test type": "quote short english", "tags": "eclipse", ... }
     const map = {};
@@ -1347,10 +1347,13 @@
   let persistentTooltips = false;
   let bigDots = false;
   let trueAverage = false;
+  let maxDots = 5000;
   try {
     persistentTooltips = localStorage.getItem('ea_persistent_tooltips') === '1';
     bigDots = localStorage.getItem('ea_big_dots') === '1';
     trueAverage = localStorage.getItem('ea_true_average') === '1';
+    const md = parseInt(localStorage.getItem('ea_max_dots') || '5000', 10);
+    if (md >= 100 && md <= 100000) maxDots = md;
   } catch (e) {}
   function saveUiPrefs() {
     try {
@@ -3647,23 +3650,17 @@
       return;
     }
 
-    // Downsample scatter if too many — but ALWAYS keep the full recent tail
-    // so last-day tests never vanish on all-time / 3-month views.
-    let drawIndexes = results.map((_, i) => i);
-    if (results.length > MAX_POINTS_DRAW) {
-      const TAIL = Math.min(400, results.length); // last 400 tests drawn 1:1
-      const headBudget = Math.max(100, MAX_POINTS_DRAW - TAIL);
-      const headEnd = results.length - TAIL;
+    // Individual dots: only the most recent `maxDots` tests.
+    // Older tests: avg lines only (no scatter). Cap avg computation if huge.
+    const dotCap = Math.max(100, Math.min(100000, Number(maxDots) || 5000));
+    const AVG_CAP = 50000; // beyond this, stride averages for performance
+    let drawIndexes;
+    if (results.length <= dotCap) {
+      drawIndexes = results.map((_, i) => i);
+    } else {
+      const start = results.length - dotCap;
       drawIndexes = [];
-      if (headEnd > 0) {
-        const step = headEnd / headBudget;
-        for (let i = 0; i < headBudget; i++) {
-          drawIndexes.push(Math.min(headEnd - 1, Math.floor(i * step)));
-        }
-      }
-      for (let i = headEnd; i < results.length; i++) drawIndexes.push(i);
-      // unique sorted
-      drawIndexes = [...new Set(drawIndexes)].sort((a, b) => a - b);
+      for (let i = start; i < results.length; i++) drawIndexes.push(i);
     }
 
     const wpmData = results.map(r => r.wpm);
@@ -4635,6 +4632,10 @@
           <label class="ea-check-btn" title="Weight averages by characters typed (long tests count more than short ones)">
             <input type="checkbox" id="ea-true-average" /> true average
           </label>
+          <label class="ea-check-btn" title="Max individual dots (most recent). Older tests show only avg lines. 100–100000">
+            max dots
+            <input type="number" id="ea-max-dots" min="100" max="100000" step="100" style="width:72px;margin-left:4px;background:var(--sub-alt-color,#2c2e31);color:var(--text-color,#d1d0c5);border:1px solid var(--sub-color,#646669);border-radius:4px;padding:2px 4px" />
+          </label>
         </div>
       </div>
     `;
@@ -4748,6 +4749,23 @@
           trueAverage = !!ta.checked;
           saveUiPrefs();
           renderArchive();
+        };
+      }
+      const mdEl = root.querySelector('#ea-max-dots');
+      if (mdEl) {
+        mdEl.value = String(maxDots);
+        const applyMaxDots = () => {
+          let v = parseInt(mdEl.value, 10);
+          if (!Number.isFinite(v)) v = 5000;
+          v = Math.max(100, Math.min(100000, v));
+          maxDots = v;
+          mdEl.value = String(v);
+          saveUiPrefs();
+          renderArchive();
+        };
+        mdEl.onchange = applyMaxDots;
+        mdEl.onkeydown = (e) => {
+          if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); applyMaxDots(); }
         };
       }
 
@@ -4883,6 +4901,7 @@
         if (p.persistentTooltips != null) persistentTooltips = !!p.persistentTooltips;
         if (p.bigDots != null) bigDots = !!p.bigDots;
         if (p.trueAverage != null) trueAverage = !!p.trueAverage;
+        if (p.maxDots != null) { const v = parseInt(p.maxDots, 10); if (v >= 100 && v <= 100000) maxDots = v; }
         try {
           localStorage.setItem('ea_persistent_tooltips', persistentTooltips ? '1' : '0');
           localStorage.setItem('ea_big_dots', bigDots ? '1' : '0');
@@ -5589,7 +5608,7 @@
           {
             label: accLabel,
             data: points.map((d, i) => ({ x: i, y: d.avgAcc == null ? null : Math.max(90, d.avgAcc) })),
-            
+
             backgroundColor: 'rgba(231, 111, 81, 0.85)',
             pointRadius: aggDotRadius,
             pointHoverRadius: dotHoverRadius,
@@ -6366,7 +6385,7 @@
     try { window.__eaReconcileStumbles = _rec; } catch (e) {}
     try { if (typeof unsafeWindow !== 'undefined') unsafeWindow.__eaReconcileStumbles = _rec; } catch (e) {}
     try { globalThis.__eaReconcileStumbles = _rec; } catch (e) {}
-  
+
     // Auto-sync every 6h only when idle (no typing / no test for 60s)
     if (!window.__eaIdleSyncScheduled) {
       window.__eaIdleSyncScheduled = true;
@@ -6396,7 +6415,7 @@
       }, 60000); // check every minute
     }
 
-  console.log('[Monkeytype Eternal Archive] v2.2.32 ready — mode/type + migrate');
+  console.log('[Monkeytype Eternal Archive] v2.2.33 ready — mode/type + migrate');
   }
 
   if (document.readyState === 'loading') {
@@ -12193,7 +12212,7 @@
     } catch (e) {}
   }, 400);
 
-  
+
   // ---- Debug helpers (console) ----
   window.__kcDebugResult = function () {
     const r = document.getElementById('result');
@@ -12232,5 +12251,5 @@
     return info;
   };
 
-console.log('[KeyConf] v2.2.32 ready \u2014', WORD_BANKS.reduce((n,b)=>n+b.length,0), 'words in', WORD_BANKS.length, 'shards');
+console.log('[KeyConf] v2.2.33 ready \u2014', WORD_BANKS.reduce((n,b)=>n+b.length,0), 'words in', WORD_BANKS.length, 'shards');
 })();
