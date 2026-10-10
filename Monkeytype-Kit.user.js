@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Monkeytype Kit Full (Archive + Jail + Hotlist + Dictation + Key Confidence)
 // @namespace    https://monkeytype.com/kit
-// @version      2.2.41
+// @version      2.2.50
 // @description  Bundle: Eternal Archive, Jail, Hotlist, Dictation, Key Confidence + Best WPM. Single Ape Key in Archive panel.
 // @author       kitkat + Grok
 // @match        https://monkeytype.com/*
@@ -6703,7 +6703,7 @@
       }, 60000); // check every minute
     }
 
-  console.log('[Monkeytype Eternal Archive] v2.2.41 ready — mode/type + migrate');
+  console.log('[Monkeytype Eternal Archive] v2.2.50 ready — mode/type + migrate');
   }
 
   if (document.readyState === 'loading') {
@@ -11175,12 +11175,17 @@
     const timingDebug = computeTimingDebug(keysSnapshot, thisTestIntervals);
 
     const slotDebug = buildSlotDebugTable(expectedWords);
+    let expectedWordsText = '';
+    try {
+      if (expectedWords && expectedWords.length) expectedWordsText = expectedWords.join(' ');
+    } catch (e) {}
     window.__mtKeyConfLast = {
       liveSlots: (session.slotTsLive || []).length,
       livePos: session.slotPos,
       slotDebug: slotDebug,
       at: new Date().toISOString(),
       expectedWords: expectedWords.length,
+      expectedWordsText: expectedWordsText,
       typedChars: typedStream.length,
       mtChars,
       liveErrors: liveErrorKeys.slice(),
@@ -11401,12 +11406,13 @@
       }
     }
     if (info && info.wpm != null) {
-      const wpm = (Math.round(info.wpm * 100) / 100).toFixed(2);
+      // 3 decimals everywhere — theoreticalMs (integer) is source of truth for time
+      const wpm = (Number(info.wpm)).toFixed(3);
       const acc = (info.acc != null ? info.acc : 100);
-      const tsec = (info.timeSec != null)
-        ? (Math.round(info.timeSec * 100) / 100).toFixed(2)
-        : (info.theoreticalMs != null ? (info.theoreticalMs / 1000).toFixed(2) : '—');
-      resEl.textContent = 'Best possible: ' + wpm + ' wpm  ' + acc + '% acc  ' + tsec + ' time';
+      const tsec = (info.theoreticalMs != null)
+        ? (Number(info.theoreticalMs) / 1000).toFixed(3)
+        : (info.timeSec != null ? Number(info.timeSec).toFixed(3) : '—');
+      resEl.textContent = 'Best possible: ' + wpm + ' wpm  ' + acc + '% acc  ' + tsec + 's';
       resEl.style.display = '';
     } else {
       resEl.textContent = '';
@@ -12441,6 +12447,7 @@
         <button id="kc-clear-int">Clear interval records</button>
         <button id="kc-debug">Debug last</button>
         <button id="kc-wpm-debug">WPM replacements</button>
+        <button id="kc-encode-claim" title="Encode last test text + theoretical best time">Encode</button>
         <button id="kc-slot-debug">Export slot debug</button>
         <button id="kc-shrink" title="Collapse panel body">Shrink</button>
         <button id="kc-test-best" title="Estimate best WPM for arbitrary text using your digraph records">Test your best</button>
@@ -12586,7 +12593,8 @@
         }
       }
       const charsCount = seq.length;
-      const minutes = totalMs / 60000;
+      const totalMsInt = Math.round(totalMs);
+      const minutes = totalMsInt / 60000;
       const wpm = minutes > 0 ? (charsCount / 5) / minutes : 0;
       const matchPct = digraphs > 0 ? (matched / digraphs) * 100 : 0;
       return {
@@ -12596,8 +12604,10 @@
         digraphs,
         matched,
         guessed,
-        totalMs,
-        wpm,
+        totalMs: totalMsInt,
+        theoreticalMs: totalMsInt,
+        timeSec: totalMsInt / 1000,
+        wpm: Math.round(wpm * 1000) / 1000,
         matchPct
       };
     }
@@ -12622,12 +12632,16 @@
             <button type="button" id="kc-tb-play" style="background:var(--sub-alt-color,#2c2e31);color:var(--main-color,#e2b714);border:1px solid var(--sub-color,#646669);border-radius:6px;padding:6px 12px;cursor:pointer">Play</button>
             <label style="font-size:0.8rem;display:flex;align-items:center;gap:4px">Switch
               <select id="kc-tb-switch" style="background:var(--sub-alt-color,#2c2e31);color:var(--text-color,#d1d0c5);border:1px solid var(--sub-color,#646669);border-radius:4px;padding:4px 6px">
-                <option value="blue">Clicky Blue</option>
-                <option value="red">Linear Red</option>
-                <option value="brown">Tactile Brown</option>
-                <option value="ink">Ink Black Thock</option>
+                <option value="brown">MX Brown (tactile)</option>
+                <option value="blue">MX Blue (clicky)</option>
+                <option value="red">MX Red (linear)</option>
+                <option value="black">MX Black (heavy)</option>
+                <option value="ink">Gateron Ink Black</option>
+                <option value="cream">NovelKeys Cream</option>
+                <option value="panda">Holy Panda</option>
+                <option value="jade">Box Jade (clicky)</option>
+                <option value="topre">Topre</option>
                 <option value="buckling">Buckling Spring</option>
-                <option value="silent">Silent (no sound)</option>
               </select>
             </label>
             <label style="font-size:0.8rem;display:flex;align-items:center;gap:4px">Vol
@@ -12777,14 +12791,20 @@
       const jitter = 0.85 + Math.random() * 0.3;
       const pitchJ = 0.92 + Math.random() * 0.16;
 
+      // More natural mechanical profiles (noise thock + soft body + optional click)
       const profiles = {
-        blue:     { noiseDur: 0.018, noiseF: 4200, toneF: 2400, toneDur: 0.035, noiseA: 0.55, toneA: 0.22, type: 'square' },
-        red:      { noiseDur: 0.012, noiseF: 1800, toneF: 380,  toneDur: 0.05,  noiseA: 0.25, toneA: 0.18, type: 'sine' },
-        brown:    { noiseDur: 0.014, noiseF: 2200, toneF: 520,  toneDur: 0.055, noiseA: 0.32, toneA: 0.2,  type: 'triangle' },
-        ink:      { noiseDur: 0.022, noiseF: 900,  toneF: 180,  toneDur: 0.09,  noiseA: 0.4,  toneA: 0.28, type: 'sine' },
-        buckling: { noiseDur: 0.025, noiseF: 3500, toneF: 1100, toneDur: 0.07,  noiseA: 0.5,  toneA: 0.25, type: 'square' }
+        blue:     { noiseDur: 0.016, noiseF: 3800, toneF: 2100, toneDur: 0.03,  noiseA: 0.48, toneA: 0.16, type: 'square',   click: 1, clickF: 4600 },
+        brown:    { noiseDur: 0.015, noiseF: 2100, toneF: 480,  toneDur: 0.06,  noiseA: 0.34, toneA: 0.2,  type: 'triangle', click: 0.35, clickF: 2800 },
+        red:      { noiseDur: 0.011, noiseF: 1600, toneF: 340,  toneDur: 0.055, noiseA: 0.22, toneA: 0.17, type: 'sine',    click: 0 },
+        black:    { noiseDur: 0.013, noiseF: 1400, toneF: 280,  toneDur: 0.07,  noiseA: 0.28, toneA: 0.2,  type: 'sine',    click: 0 },
+        ink:      { noiseDur: 0.024, noiseF: 780,  toneF: 160,  toneDur: 0.1,   noiseA: 0.42, toneA: 0.3,  type: 'sine',    click: 0 },
+        cream:    { noiseDur: 0.02,  noiseF: 1100, toneF: 220,  toneDur: 0.085, noiseA: 0.38, toneA: 0.26, type: 'triangle', click: 0 },
+        panda:    { noiseDur: 0.018, noiseF: 1500, toneF: 380,  toneDur: 0.075, noiseA: 0.4,  toneA: 0.24, type: 'triangle', click: 0.25, clickF: 2200 },
+        jade:     { noiseDur: 0.02,  noiseF: 4500, toneF: 2600, toneDur: 0.032, noiseA: 0.55, toneA: 0.18, type: 'square',   click: 1, clickF: 5200 },
+        topre:    { noiseDur: 0.028, noiseF: 1200, toneF: 420,  toneDur: 0.09,  noiseA: 0.36, toneA: 0.22, type: 'sine',    click: 0.15, clickF: 1800 },
+        buckling: { noiseDur: 0.028, noiseF: 3200, toneF: 980,  toneDur: 0.08,  noiseA: 0.5,  toneA: 0.24, type: 'square',   click: 1, clickF: 3000 }
       };
-      const p = profiles[switchType] || profiles.blue;
+      const p = profiles[switchType] || profiles.brown;
 
       // Noise click
       try {
@@ -12818,16 +12838,17 @@
         osc.stop(t0 + p.toneDur * jitter + 0.02);
       } catch (e) {}
 
-      // Extra high tick for blue / buckling
-      if (switchType === 'blue' || switchType === 'buckling') {
+      // Optional click bar / tactile tick
+      if (p.click && p.click > 0) {
         try {
           const osc = ctx.createOscillator();
           osc.type = 'square';
-          osc.frequency.value = (switchType === 'blue' ? 4800 : 3200) * pitchJ;
+          osc.frequency.value = (p.clickF || 4000) * pitchJ;
           const g3 = ctx.createGain();
+          const a = 0.1 * p.click * vol;
           g3.gain.setValueAtTime(0.0001, t0);
-          g3.gain.exponentialRampToValueAtTime(Math.max(0.001, 0.12 * vol), t0 + 0.0008);
-          g3.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.012 * jitter);
+          g3.gain.exponentialRampToValueAtTime(Math.max(0.001, a), t0 + 0.0007);
+          g3.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.011 * jitter);
           osc.connect(g3); g3.connect(ctx.destination);
           osc.start(t0);
           osc.stop(t0 + 0.02);
@@ -12939,7 +12960,560 @@
       }
     };
 
-    const testBestBtn = document.getElementById('kc-test-best');
+
+    
+
+
+
+    // ===== Claim encoder v4: reliable base64url (exact round-trip) =====
+    // Payload: magic "QK2" + checksum3 + timeMs(u32 BE) + utf8(text)
+    // Alphabet is Discord/email safe ASCII. Length ≈ 4/3 of binary, not minimal,
+    // but decode always matches encode bit-for-bit.
+    const CLAIM_SALT = 'mt-kit-claim-v4';
+
+    function claimChecksum3(text, timeMs) {
+      const s = String(text) + '|' + String(timeMs >>> 0) + '|' + CLAIM_SALT;
+      let h = 0x811c9dc5;
+      for (let i = 0; i < s.length; i++) {
+        h ^= s.charCodeAt(i);
+        h = Math.imul(h, 0x01000193);
+      }
+      h = h >>> 0;
+      return [(h >>> 16) & 255, (h >>> 8) & 255, h & 255];
+    }
+
+    function claimToBase64Url(bytes) {
+      let bin = '';
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+    }
+    function claimFromBase64Url(str) {
+      str = String(str || '').replace(/-/g, '+').replace(/_/g, '/');
+      while (str.length % 4) str += '=';
+      const bin = atob(str);
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    }
+
+    function encodeClaim(text, timeSec) {
+      text = String(text || '');
+      // Quantize once to integer ms — this is the only rounding allowed (1 ms resolution)
+      const timeMs = Math.round(Number(timeSec) * 1000);
+      if (!text) throw new Error('empty text');
+      if (!isFinite(timeMs) || timeMs < 0 || timeMs > 86400000) throw new Error('bad time');
+      const te = new TextEncoder();
+      const textBytes = te.encode(text);
+      const sum = claimChecksum3(text, timeMs);
+      const out = new Uint8Array(3 + 3 + 4 + textBytes.length);
+      out[0] = 0x51; // Q
+      out[1] = 0x4b; // K
+      out[2] = 0x32; // 2
+      out[3] = sum[0];
+      out[4] = sum[1];
+      out[5] = sum[2];
+      out[6] = (timeMs >>> 24) & 255;
+      out[7] = (timeMs >>> 16) & 255;
+      out[8] = (timeMs >>> 8) & 255;
+      out[9] = timeMs & 255;
+      out.set(textBytes, 10);
+      return claimToBase64Url(out);
+    }
+
+    function decodeClaim(line) {
+      line = String(line || '').trim().replace(/\s+/g, '');
+      // strip optional display prefixes
+      if (line.charAt(0) === '\u211A' || line.charCodeAt(0) === 0x211A) line = line.slice(1);
+      // reject obvious CJK-only legacy lines early with clear message
+      if (/[\u4E00-\u9FFF]/.test(line) && !/[A-Za-z0-9_-]/.test(line)) {
+        throw new Error('old CJK claim format — re-Copy from Encode');
+      }
+      let raw;
+      try {
+        raw = claimFromBase64Url(line);
+      } catch (e) {
+        throw new Error('not a valid claim line');
+      }
+      if (raw.length < 11) throw new Error('too short');
+      // QK2 current
+      if (raw[0] === 0x51 && raw[1] === 0x4b && raw[2] === 0x32) {
+        const timeMs = ((raw[6] << 24) | (raw[7] << 16) | (raw[8] << 8) | raw[9]) >>> 0;
+        const text = new TextDecoder().decode(raw.slice(10));
+        const expect = claimChecksum3(text, timeMs);
+        if (raw[3] !== expect[0] || raw[4] !== expect[1] || raw[5] !== expect[2]) {
+          throw new Error('checksum mismatch (tampered or corrupt)');
+        }
+        return { text, timeMs, timeSec: timeMs / 1000 };
+      }
+      // QK1 legacy (older salt) — accept text+time without strict sum if magic matches
+      if (raw[0] === 0x51 && raw[1] === 0x4b && raw[2] === 0x31) {
+        const timeMs = ((raw[6] << 24) | (raw[7] << 16) | (raw[8] << 8) | raw[9]) >>> 0;
+        const text = new TextDecoder().decode(raw.slice(10));
+        return { text, timeMs, timeSec: timeMs / 1000 };
+      }
+      throw new Error('bad magic / corrupt line');
+    }
+
+    function getLastResultText() {
+      try {
+        if (typeof getExpectedWordsFromResult === 'function') {
+          const words = getExpectedWordsFromResult();
+          if (words && words.length) return words.join(' ');
+        }
+      } catch (e) {}
+      // DOM fallback
+      const roots = [
+        document.querySelector('#resultWordsHistory'),
+        document.querySelector('.resultWordsHistory'),
+        document.querySelector('#result .words'),
+        document.querySelector('#words')
+      ].filter(Boolean);
+      for (const root of roots) {
+        const wordEls = root.querySelectorAll('.word');
+        if (!wordEls.length) continue;
+        const parts = [];
+        wordEls.forEach((w) => {
+          let s = '';
+          w.querySelectorAll('letter, .letter').forEach((l) => {
+            if (l.classList.contains('extra')) return;
+            s += (l.textContent || '');
+          });
+          if (!s) s = (w.textContent || '').replace(/\s+/g, '');
+          if (s) parts.push(s);
+        });
+        if (parts.length) return parts.join(' ');
+      }
+      // session snapshot
+      try {
+        const last = window.__mtKeyConfLast;
+        if (last && last.expectedWordsText) return last.expectedWordsText;
+      } catch (e) {}
+      return '';
+    }
+
+    function getTheoreticalBestTimeSec() {
+      try {
+        const last = window.__mtKeyConfLast;
+        const bp = last && last.bestPossibleWpm;
+        if (!bp) return null;
+        // Prefer integer theoreticalMs — exact ms, no float drift
+        if (bp.theoreticalMs != null && isFinite(bp.theoreticalMs)) {
+          return Math.round(Number(bp.theoreticalMs)) / 1000;
+        }
+        if (bp.timeSec != null && isFinite(bp.timeSec)) {
+          return Math.round(Number(bp.timeSec) * 1000) / 1000;
+        }
+      } catch (e) {}
+      return null;
+    }
+    function getTheoreticalBestTimeMs() {
+      try {
+        const last = window.__mtKeyConfLast;
+        const bp = last && last.bestPossibleWpm;
+        if (!bp) return null;
+        if (bp.theoreticalMs != null && isFinite(bp.theoreticalMs)) {
+          return Math.round(Number(bp.theoreticalMs));
+        }
+        if (bp.timeSec != null && isFinite(bp.timeSec)) {
+          return Math.round(Number(bp.timeSec) * 1000);
+        }
+      } catch (e) {}
+      return null;
+    }
+
+    function openEncodeClaimModal() {
+      let modal = document.getElementById('kc-claim-modal');
+      if (modal) {
+        modal.style.display = 'flex';
+        try {
+          const text = getLastResultText() || '';
+          const tsec = getTheoreticalBestTimeSec();
+          const textEl = modal.querySelector('#kc-cl-text');
+          const timeEl = modal.querySelector('#kc-cl-time-label');
+          const meta = modal.querySelector('#kc-cl-meta');
+          if (textEl) textEl.textContent = text || '(no result text)';
+          if (timeEl) timeEl.textContent = (tsec != null && isFinite(tsec)) ? (tsec.toFixed(3) + 's') : '—';
+          if (meta && text && tsec != null) {
+            const wpm = (text.length / 5) / (tsec / 60);
+            meta.textContent = 'Ready · ' + text.length + ' chars · ' + tsec.toFixed(3) + 's · ≈ ' + wpm.toFixed(3) + ' wpm';
+          }
+        } catch (e) {}
+        return;
+      }
+      modal = document.createElement('div');
+      modal.id = 'kc-claim-modal';
+      modal.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px;';
+      modal.innerHTML = `
+        <div style="background:var(--bg-color,#323437);color:var(--text-color,#d1d0c5);border:1px solid var(--sub-color,#646669);border-radius:12px;max-width:880px;width:100%;max-height:92vh;overflow:auto;padding:18px 20px;box-shadow:0 16px 48px rgba(0,0,0,.5);box-sizing:border-box">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+            <strong style="color:var(--main-color,#e2b714);font-size:1.1rem;letter-spacing:.02em">Encode</strong>
+            <button type="button" id="kc-cl-close" style="background:transparent;border:none;color:var(--text-color);font-size:1.3rem;cursor:pointer;line-height:1;opacity:.8">×</button>
+          </div>
+          <p style="font-size:0.78rem;opacity:.75;margin:0 0 12px;line-height:1.4">Last result text + theoretical best time. Copy packs both into one line.</p>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:stretch">
+            <div style="display:flex;flex-direction:column;min-width:0">
+              <div style="font-size:0.72rem;opacity:.65;margin-bottom:5px;text-transform:uppercase;letter-spacing:.04em">Text (from last result)</div>
+              <div id="kc-cl-text" style="flex:1;min-height:9.5em;max-height:9.5em;overflow:auto;box-sizing:border-box;background:var(--sub-alt-color,#2c2e31);color:var(--text-color);border:1px solid var(--sub-color,#646669);border-radius:8px;padding:10px 12px;font-family:ui-monospace,Consolas,monospace;font-size:0.84rem;line-height:1.45;white-space:pre-wrap;word-break:break-word"></div>
+              <div style="margin-top:10px;font-size:0.82rem">Theoretical best: <b id="kc-cl-time-label" style="color:var(--main-color,#e2b714)">—</b></div>
+              <button type="button" id="kc-cl-copy" style="margin-top:10px;align-self:flex-start;background:var(--main-color,#e2b714);color:#111;border:none;border-radius:8px;padding:7px 16px;font-weight:700;cursor:pointer;font-size:0.9rem">Copy</button>
+              <div id="kc-cl-meta" style="margin-top:8px;font-size:0.76rem;opacity:.8;min-height:1.2em"></div>
+            </div>
+            <div style="display:flex;flex-direction:column;min-width:0">
+              <div style="font-size:0.72rem;opacity:.65;margin-bottom:5px;text-transform:uppercase;letter-spacing:.04em">Input competitor</div>
+              <textarea id="kc-cl-challenger" placeholder="paste claim line" style="flex:1;min-height:9.5em;max-height:9.5em;resize:none;box-sizing:border-box;background:var(--sub-alt-color,#2c2e31);color:var(--text-color);border:1px solid var(--sub-color,#646669);border-radius:8px;padding:10px 12px;font-family:ui-monospace,Consolas,monospace;font-size:0.8rem;line-height:1.4;word-break:break-all"></textarea>
+              <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center">
+                <button type="button" id="kc-cl-race" style="background:var(--main-color,#e2b714);color:#111;border:none;border-radius:8px;padding:7px 16px;font-weight:700;cursor:pointer;font-size:0.9rem">Race</button>
+                <button type="button" id="kc-cl-quick" style="background:var(--sub-alt-color,#2c2e31);color:var(--main-color,#e2b714);border:1px solid var(--sub-color,#646669);border-radius:8px;padding:7px 14px;cursor:pointer;font-size:0.88rem">Quick race</button>
+              </div>
+              <div id="kc-cl-race-err" style="margin-top:6px;font-size:0.76rem;color:#e06c75;min-height:1.1em"></div>
+              <div id="kc-cl-quick-out" style="margin-top:4px;font-size:0.84rem;opacity:.95"></div>
+            </div>
+          </div>
+          <div id="kc-cl-race-box" style="display:none;margin-top:16px;border-top:1px solid var(--sub-color,#646669);padding-top:14px">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px">
+              <div style="font-size:0.82rem;opacity:.9">Race — You = digraph best · Him = even pace</div>
+              <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+                <label style="font-size:0.78rem;display:flex;align-items:center;gap:5px;opacity:.9">Switch
+                  <select id="kc-cl-switch" style="background:var(--sub-alt-color,#2c2e31);color:var(--text-color);border:1px solid var(--sub-color,#646669);border-radius:6px;padding:4px 8px;font-size:0.78rem">
+                    <option value="brown">MX Brown</option>
+                    <option value="blue">MX Blue</option>
+                    <option value="red">MX Red</option>
+                    <option value="black">MX Black</option>
+                    <option value="ink">Ink Black</option>
+                    <option value="cream">NK Cream</option>
+                    <option value="panda">Holy Panda</option>
+                    <option value="jade">Box Jade</option>
+                    <option value="topre">Topre</option>
+                    <option value="buckling">Buckling Spring</option>
+                  </select>
+                </label>
+                <label style="font-size:0.78rem;display:flex;align-items:center;gap:5px;opacity:.9">Vol
+                  <input id="kc-cl-vol" type="range" min="0" max="100" value="55" style="width:90px;vertical-align:middle" />
+                  <span id="kc-cl-vol-lbl" style="min-width:2em;font-variant-numeric:tabular-nums">55</span>
+                </label>
+              </div>
+            </div>
+            <div style="display:grid;grid-template-columns:48px 1fr;gap:8px 12px;align-items:start">
+              <div style="font-size:0.75rem;color:var(--main-color,#e2b714);padding-top:10px;text-align:right;font-weight:600">You</div>
+              <div id="kc-cl-race-you" style="font-family:ui-monospace,Consolas,monospace;font-size:0.95rem;line-height:1.5;height:calc(1.5em * 5 + 20px);max-height:calc(1.5em * 5 + 20px);overflow:auto;background:var(--sub-alt-color,#2c2e31);border-radius:8px;padding:10px 12px;border:1px solid var(--sub-color,#646669);white-space:pre-wrap;word-break:break-word;box-sizing:border-box"></div>
+              <div style="font-size:0.75rem;color:#7aa2f7;padding-top:10px;text-align:right;font-weight:600">Him</div>
+              <div id="kc-cl-race-ch" style="font-family:ui-monospace,Consolas,monospace;font-size:0.95rem;line-height:1.5;height:calc(1.5em * 5 + 20px);max-height:calc(1.5em * 5 + 20px);overflow:auto;background:var(--sub-alt-color,#2c2e31);border-radius:8px;padding:10px 12px;border:1px solid var(--sub-color,#646669);white-space:pre-wrap;word-break:break-word;box-sizing:border-box"></div>
+            </div>
+            <div id="kc-cl-race-status" style="margin-top:10px;font-size:0.82rem;opacity:.9"></div>
+          </div>
+        </div>`;
+      document.body.appendChild(modal);
+      const close = () => { modal.style.display = 'none'; stopClaimRace(); };
+      modal.querySelector('#kc-cl-close').onclick = close;
+      modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+
+      // Locked snapshot — read once from KeyConf result, not from editable fields
+      let _claimText = '';
+      let _claimTimeSec = null;
+
+      function fillClaimFromLastTest(m) {
+        const text = getLastResultText();
+        const tsec = getTheoreticalBestTimeSec();
+        _claimText = text || '';
+        _claimTimeSec = (tsec != null && isFinite(tsec) && tsec > 0) ? tsec : null;
+        const textEl = m.querySelector('#kc-cl-text');
+        const timeEl = m.querySelector('#kc-cl-time-label');
+        const meta = m.querySelector('#kc-cl-meta');
+        if (textEl) textEl.textContent = _claimText || '(no result text — finish a test with KeyConf on)';
+        if (timeEl) timeEl.textContent = _claimTimeSec != null ? (_claimTimeSec.toFixed(3) + 's') : '—';
+        if (meta) {
+          if (!_claimText) meta.textContent = 'No result text found.';
+          else if (_claimTimeSec == null) meta.textContent = 'Text loaded; theoretical time missing.';
+          else {
+            const wpm = (_claimText.length / 5) / (_claimTimeSec / 60);
+            meta.textContent = 'Ready · ' + _claimText.length + ' chars · ' + _claimTimeSec.toFixed(3) + 's · ≈ ' + wpm.toFixed(3) + ' wpm';
+          }
+        }
+      }
+      fillClaimFromLastTest(modal);
+
+      const volEl = modal.querySelector('#kc-cl-vol');
+      const volLbl = modal.querySelector('#kc-cl-vol-lbl');
+      if (volEl && volLbl) {
+        volEl.oninput = () => { volLbl.textContent = volEl.value; };
+      }
+
+
+      const chIn = modal.querySelector('#kc-cl-challenger');
+      if (chIn) {
+        chIn.addEventListener('paste', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          let clip = '';
+          try {
+            clip = (e.clipboardData || window.clipboardData).getData('text') || '';
+          } catch (err) {}
+          // Replace entire field (never append into a huge old paste)
+          chIn.value = String(clip).trim();
+        });
+        chIn.addEventListener('focus', () => {
+          // Select all so next paste/type replaces
+          try { chIn.select(); } catch (e) {}
+        });
+      }
+
+
+      modal.querySelector('#kc-cl-copy').onclick = async () => {
+        const meta = modal.querySelector('#kc-cl-meta');
+        // Re-read locked values at click time from KeyConf (not DOM fields)
+        const text = getLastResultText() || _claimText;
+        let tMs = (typeof getTheoreticalBestTimeMs === 'function') ? getTheoreticalBestTimeMs() : null;
+        if (tMs == null) {
+          const tsec0 = getTheoreticalBestTimeSec() != null ? getTheoreticalBestTimeSec() : _claimTimeSec;
+          if (tsec0 != null && isFinite(tsec0)) tMs = Math.round(Number(tsec0) * 1000);
+        }
+        if (!text || tMs == null || !isFinite(tMs)) {
+          meta.textContent = 'Nothing to copy — need last result + theoretical best.';
+          return;
+        }
+        const tsec = tMs / 1000;
+        try {
+          const line = encodeClaim(text, tsec);
+          _claimText = text;
+          _claimTimeSec = tsec;
+          const hidden = modal.querySelector('#kc-cl-out');
+          if (hidden) hidden.textContent = line;
+          await navigator.clipboard.writeText(line);
+          const wpm = (text.length / 5) / (tsec / 60);
+          meta.innerHTML = 'Copied <b>' + line.length + '</b> chars · ' + text.length + ' · ' + tsec.toFixed(3) + 's · ≈ ' + wpm.toFixed(3) + ' wpm';
+          try { showToast('Claim copied', 'success', 1500); } catch (e) {}
+        } catch (err) {
+          meta.textContent = 'Error: ' + (err && err.message ? err.message : err);
+        }
+      };
+
+      let raceTimers = [];
+      let raceRafs = [];
+      function stopClaimRace() {
+        raceTimers.forEach((t) => clearTimeout(t));
+        raceTimers = [];
+        raceRafs.forEach((r) => cancelAnimationFrame(r));
+        raceRafs = [];
+      }
+
+      function buildYouDelays(seq, targetMs) {
+        const n = seq.length;
+        if (n < 2) return [0];
+        let delays = [0];
+        let rawSum = 0;
+        for (let i = 1; i < n; i++) {
+          const prev = seq[i - 1], cur = seq[i];
+          let ms = null;
+          try {
+            const pk = (typeof pairKey === 'function')
+              ? pairKey(prev, cur)
+              : ((prev === ' ' ? 'spc' : prev) + '\u2192' + (cur === ' ' ? 'spc' : cur));
+            ms = intervalBest[pk];
+            if (!(ms != null && isFinite(ms) && ms >= MIN_DIGRAPH_MS && ms <= MAX_DIGRAPH_MS)) {
+              ms = (typeof estimateSecondCharMs === 'function') ? estimateSecondCharMs(cur) : null;
+            }
+          } catch (e) { ms = null; }
+          if (!(ms != null && isFinite(ms) && ms > 0)) ms = 80;
+          delays.push(Number(ms));
+          rawSum += Number(ms);
+        }
+        if (rawSum <= 0) {
+          const per = targetMs / (n - 1);
+          return seq.map((_, i) => i === 0 ? 0 : per);
+        }
+        const scale = targetMs / rawSum;
+        const scaled = delays.map((d, i) => i === 0 ? 0 : d * scale);
+        let s = 0;
+        for (let i = 1; i < scaled.length; i++) s += scaled[i];
+        scaled[scaled.length - 1] += (targetMs - s);
+        return scaled;
+      }
+
+      function buildEvenDelays(seq, targetMs) {
+        const n = seq.length;
+        if (n < 2) return [0];
+        const per = targetMs / (n - 1);
+        const delays = seq.map((_, i) => i === 0 ? 0 : per);
+        let s = 0;
+        for (let i = 1; i < delays.length; i++) s += delays[i];
+        delays[delays.length - 1] += (targetMs - s);
+        return delays;
+      }
+
+      function delaysToAbsTimes(delays) {
+        // abs[i] = when character i appears, from t=0; abs[0]=0
+        const abs = [0];
+        for (let i = 1; i < delays.length; i++) abs.push(abs[i - 1] + delays[i]);
+        return abs;
+      }
+
+      function winnerLabel(youMs, himMs) {
+        const y = Math.round(youMs);
+        const h = Math.round(himMs);
+        if (y === h) return 'Tie';
+        return y < h ? 'You' : 'Him';
+      }
+      function winnerHtml(w) {
+        if (w === 'Tie') return '<b style="color:var(--main-color,#e2b714)">Tie</b>';
+        if (w === 'You') return '<b style="color:#6fcf97">Winner: You</b>';
+        return '<b style="color:#e06c75">Loss</b>';
+      }
+
+      modal.querySelector('#kc-cl-quick').onclick = () => {
+        const errEl = modal.querySelector('#kc-cl-race-err');
+        const qOut = modal.querySelector('#kc-cl-quick-out');
+        errEl.textContent = '';
+        qOut.textContent = '';
+        let him;
+        try {
+          him = decodeClaim(modal.querySelector('#kc-cl-challenger').value || '');
+        } catch (err) {
+          errEl.textContent = 'Him: ' + (err && err.message ? err.message : err);
+          return;
+        }
+        let myMs = (typeof getTheoreticalBestTimeMs === 'function') ? getTheoreticalBestTimeMs() : null;
+        if (myMs == null) {
+          const t = getTheoreticalBestTimeSec() != null ? getTheoreticalBestTimeSec() : _claimTimeSec;
+          if (t != null && isFinite(t) && t > 0) myMs = Math.round(Number(t) * 1000);
+        } else myMs = Math.round(myMs);
+        if (myMs == null || !isFinite(myMs) || myMs <= 0) {
+          errEl.textContent = 'Missing your theoretical best time.';
+          return;
+        }
+        const chMs = Math.round(Number(him.timeMs));
+        const myTime = myMs / 1000;
+        const chTime = chMs / 1000;
+        const text = him.text || '';
+        const myWpm = text.length ? (text.length / 5) / (myTime / 60) : 0;
+        const chWpm = text.length ? (text.length / 5) / (chTime / 60) : 0;
+        const w = winnerLabel(myMs, chMs);
+        const marginMs = Math.abs(myMs - chMs);
+        qOut.innerHTML = '<b>Quick race</b><br>' +
+          'You: <b>' + myTime.toFixed(3) + 's</b> ≈ ' + myWpm.toFixed(3) + ' wpm<br>' +
+          'Him: <b>' + chTime.toFixed(3) + 's</b> ≈ ' + chWpm.toFixed(3) + ' wpm<br>' +
+          winnerHtml(w) + (w === 'Tie' ? '' : (' by ' + marginMs + ' ms'));
+      };
+
+      modal.querySelector('#kc-cl-race').onclick = () => {
+        const errEl = modal.querySelector('#kc-cl-race-err');
+        errEl.textContent = '';
+        stopClaimRace();
+        let him;
+        try {
+          him = decodeClaim(modal.querySelector('#kc-cl-challenger').value || '');
+        } catch (err) {
+          errEl.textContent = 'Him: ' + (err && err.message ? err.message : err);
+          return;
+        }
+        let myTargetMs = (typeof getTheoreticalBestTimeMs === 'function') ? getTheoreticalBestTimeMs() : null;
+        if (myTargetMs == null) {
+          const myTime = getTheoreticalBestTimeSec() != null ? getTheoreticalBestTimeSec() : _claimTimeSec;
+          if (myTime != null && isFinite(myTime) && myTime > 0) myTargetMs = Math.round(Number(myTime) * 1000);
+        } else {
+          myTargetMs = Math.round(myTargetMs);
+        }
+        if (myTargetMs == null || !isFinite(myTargetMs) || myTargetMs <= 0) {
+          errEl.textContent = 'Missing your theoretical best time.';
+          return;
+        }
+        const text = him.text;
+        const chTargetMs = Math.round(Number(him.timeMs));
+        const seq = Array.from(text);
+
+        const box = modal.querySelector('#kc-cl-race-box');
+        box.style.display = 'block';
+        const youEl = modal.querySelector('#kc-cl-race-you');
+        const chEl = modal.querySelector('#kc-cl-race-ch');
+        const st = modal.querySelector('#kc-cl-race-status');
+        youEl.innerHTML = '';
+        chEl.innerHTML = '';
+
+        const youDelays = buildYouDelays(seq, myTargetMs);
+        const chDelays = buildEvenDelays(seq, chTargetMs);
+        const youAbs = delaysToAbsTimes(youDelays);
+        const chAbs = delaysToAbsTimes(chDelays);
+
+        // Single shared clock — schedule by absolute time so equal targets finish together
+        const t0 = performance.now();
+
+        function runLaneAbs(el, absTimes, color, label, targetMs, doneCb, withSound) {
+          let next = 0;
+          const sw = (modal.querySelector('#kc-cl-switch') || {}).value || 'brown';
+          const vol = ((modal.querySelector('#kc-cl-vol') || {}).value || 55) / 100;
+          function paint(i) {
+            if (i >= seq.length) return;
+            const span = document.createElement('span');
+            span.textContent = seq[i] === ' ' ? '\u00a0' : seq[i];
+            span.style.color = color;
+            el.appendChild(span);
+            if (el.childNodes.length > 1) {
+              const prev = el.childNodes[el.childNodes.length - 2];
+              if (prev && prev.style) prev.style.color = 'var(--text-color,#d1d0c5)';
+            }
+            // Auto-scroll race box to keep caret visible
+            try { el.scrollTop = el.scrollHeight; } catch (e) {}
+            if (withSound && typeof kcPlayKeySound === 'function') {
+              try { kcPlayKeySound(sw, vol * (seq[i] === ' ' ? 0.8 : 1)); } catch (e) {}
+            }
+          }
+          function tick() {
+            const elapsed = performance.now() - t0;
+            while (next < seq.length && absTimes[next] <= elapsed + 0.25) {
+              paint(next);
+              next++;
+            }
+            if (next >= seq.length) {
+              doneCb(label, targetMs);
+              return;
+            }
+            const id = requestAnimationFrame(tick);
+            raceRafs.push(id);
+          }
+          const finishId = setTimeout(() => {
+            while (next < seq.length) { paint(next); next++; }
+            doneCb(label, targetMs);
+          }, Math.max(0, targetMs));
+          raceTimers.push(finishId);
+          const id = requestAnimationFrame(tick);
+          raceRafs.push(id);
+        }
+
+        let finished = 0;
+        const results = {};
+        const doneOnce = {};
+        function onDone(label, elapsedMs) {
+          if (doneOnce[label]) return;
+          doneOnce[label] = true;
+          results[label] = elapsedMs;
+          finished++;
+          if (finished >= 2) {
+            const y = results.You;
+            const c = results.Him;
+            const yw = (seq.length / 5) / (y / 60000);
+            const cw = (seq.length / 5) / (c / 60000);
+            const w = winnerLabel(y, c);
+            st.innerHTML = 'You <b>' + (y / 1000).toFixed(3) + 's</b> (≈' + yw.toFixed(3) + ' wpm) · ' +
+              'Him <b>' + (c / 1000).toFixed(3) + 's</b> (≈' + cw.toFixed(3) + ' wpm) · ' +
+              winnerHtml(w);
+          }
+        }
+        st.textContent = 'Racing…';
+        try { kcGetAudio(); } catch (e) {}
+        runLaneAbs(youEl, youAbs, 'var(--main-color,#e2b714)', 'You', myTargetMs, onDone, true);
+        runLaneAbs(chEl, chAbs, '#7aa2f7', 'Him', chTargetMs, onDone, false);
+      };
+        } // end openEncodeClaimModal
+
+    const claimBtn = document.getElementById('kc-encode-claim');
+    if (claimBtn) {
+      claimBtn.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openEncodeClaimModal();
+      };
+    }
+
+        const testBestBtn = document.getElementById('kc-test-best');
     if (testBestBtn) {
       testBestBtn.onclick = (e) => {
         e.preventDefault();
@@ -13028,5 +13602,5 @@
     return info;
   };
 
-console.log('[KeyConf] v2.2.41 ready \u2014', WORD_BANKS.reduce((n,b)=>n+b.length,0), 'words in', WORD_BANKS.length, 'shards');
+console.log('[KeyConf] v2.2.50 ready \u2014', WORD_BANKS.reduce((n,b)=>n+b.length,0), 'words in', WORD_BANKS.length, 'shards');
 })();
