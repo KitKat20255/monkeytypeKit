@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Monkeytype Kit Full (Archive + Jail + Hotlist + Dictation + Key Confidence)
 // @namespace    https://monkeytype.com/kit
-// @version      2.2.50
+// @version      2.2.54
 // @description  Bundle: Eternal Archive, Jail, Hotlist, Dictation, Key Confidence + Best WPM. Single Ape Key in Archive panel.
 // @author       kitkat + Grok
 // @match        https://monkeytype.com/*
@@ -6703,7 +6703,7 @@
       }, 60000); // check every minute
     }
 
-  console.log('[Monkeytype Eternal Archive] v2.2.50 ready — mode/type + migrate');
+  console.log('[Monkeytype Eternal Archive] v2.2.54 ready — mode/type + migrate');
   }
 
   if (document.readyState === 'loading') {
@@ -9078,6 +9078,53 @@
 
     sections.prepend(container);
 
+    // Dictation feature master switch (under hotlist)
+    if (!document.getElementById('mtDictationMenu')) {
+      const dictOn = (() => { try { return localStorage.getItem('mt_dict_feature') === 'true'; } catch (e) { return false; } })();
+      const dictSec = document.createElement('div');
+      dictSec.className = 'section dictation-feature fullWidth';
+      dictSec.id = 'mtDictationMenu';
+      dictSec.innerHTML = `
+      <div class="groupTitle">
+        <i class="fas fa-microphone"></i> <span>dictation</span>
+      </div>
+      <div class="text">
+        Kokoro TTS dictation bar on the test page. When <b>off</b>, nothing is injected — no multiline interference.
+      </div>
+      <div class="buttons">
+        <button id="dictFeatureOffBtn" type="button">off</button>
+        <button id="dictFeatureOnBtn" type="button">on</button>
+      </div>`;
+      // place directly under hotlist
+      if (container.nextSibling) container.parentNode.insertBefore(dictSec, container.nextSibling);
+      else container.parentNode.appendChild(dictSec);
+      const syncDictBtns = () => {
+        const on = (() => { try { return localStorage.getItem('mt_dict_feature') === 'true'; } catch (e) { return false; } })();
+        const offB = document.getElementById('dictFeatureOffBtn');
+        const onB = document.getElementById('dictFeatureOnBtn');
+        if (offB) offB.classList.toggle('active', !on);
+        if (onB) onB.classList.toggle('active', on);
+      };
+      syncDictBtns();
+      document.getElementById('dictFeatureOffBtn').onclick = () => {
+        try { localStorage.setItem('mt_dict_feature', 'false'); } catch (e) {}
+        syncDictBtns();
+        const bar = document.getElementById('mt-dictation-config-bar');
+        if (bar) bar.remove();
+        try {
+          const st = document.getElementById('mt-dictation-style');
+          if (st) st.innerHTML = '';
+        } catch (e) {}
+      };
+      document.getElementById('dictFeatureOnBtn').onclick = () => {
+        try { localStorage.setItem('mt_dict_feature', 'true'); } catch (e) {}
+        syncDictBtns();
+        try { if (typeof injectUIControls === 'function') injectUIControls(); } catch (e) {}
+        // injectUIControls is inside dictation IIFE — dispatch event instead
+        try { window.dispatchEvent(new CustomEvent('mt-dict-feature-on')); } catch (e) {}
+      };
+    }
+
     const mainInput = document.getElementById('hotlistAddInput');
     const redInput = document.getElementById('redHotlistAddInput');
     const mainExactToggle = document.getElementById('hotlistExactToggle');
@@ -9597,6 +9644,8 @@
     }
 
     function processTypingPacing() {
+        if (typeof isDictationFeatureOn === 'function' && !isDictationFeatureOn()) return;
+        if (!state.enabled) return;
         if (!state.enabled) return;
 
         // CRITICAL FIX: Restrict elements purely to typing container to avoid trailing page cache additions
@@ -9652,6 +9701,10 @@
         }
     });
     function setupLiveInputListeners() {
+        if (typeof isDictationFeatureOn === 'function' && !isDictationFeatureOn()) {
+          try { domWatcher.disconnect(); } catch (e) {}
+          return;
+        }
         const wordsContainer = document.getElementById('words');
         if (wordsContainer) {
             domWatcher.observe(wordsContainer, { attributes: true, childList: true, subtree: true, attributeFilter: ['class'] });
@@ -9823,9 +9876,17 @@
     });
 
     setInterval(() => {
+        if (typeof isDictationFeatureOn === 'function' ? isDictationFeatureOn() : (localStorage.getItem('mt_dict_feature') === 'true')) {
+          injectUIControls();
+          setupLiveInputListeners();
+        }
+    }, 250);
+    window.addEventListener('mt-dict-feature-on', () => {
+      try {
         injectUIControls();
         setupLiveInputListeners();
-    }, 250);
+      } catch (e) {}
+    });
 })();
 
 
@@ -11218,6 +11279,44 @@
     // Always expose replacements for WPM debug panel
     if (bestWpm && bestWpm.replacements) {
       window.__mtKeyConfLast.replacements = bestWpm.replacements;
+      // Force theoretical time = pure digraph-DB sum on expected text (identical to Race / Copy)
+      try {
+        let txt = '';
+        try { if (expectedWordsText) txt = expectedWordsText; } catch (e) {}
+        if (!txt) {
+          try { txt = (typeof getLastResultText === 'function') ? (getLastResultText() || '') : ''; } catch (e) {}
+        }
+        if (!txt && expectedWords && expectedWords.length) {
+          try { txt = expectedWords.join(' '); } catch (e) {}
+        }
+        if (txt && txt.length >= 2) {
+          const seq = Array.from(String(txt));
+          let total = 0;
+          for (let i = 1; i < seq.length; i++) {
+            const prev = seq[i - 1], cur = seq[i];
+            let ms = null;
+            try {
+              const pk = (prev === ' ' ? 'spc' : prev) + '\u2192' + (cur === ' ' ? 'spc' : cur);
+              const rec = intervalBest[pk];
+              if (rec != null && isFinite(rec) && rec >= MIN_DIGRAPH_MS && rec <= MAX_DIGRAPH_MS) {
+                ms = Number(rec);
+              } else if (typeof estimateSecondCharMs === 'function') {
+                ms = estimateSecondCharMs(cur);
+              }
+            } catch (e) { ms = null; }
+            if (!(ms != null && isFinite(ms) && ms > 0)) ms = 80;
+            total += Math.round(Number(ms));
+          }
+          total = Math.round(total);
+          if (total > 0) {
+            const wpm = (seq.length / 5) / (total / 60000);
+            bestWpm.theoreticalMs = total;
+            bestWpm.timeSec = total / 1000;
+            bestWpm.wpm = Math.round(wpm * 1000) / 1000;
+            bestWpm.acc = 100;
+          }
+        }
+      } catch (e) { console.warn('[KeyConf] digraph-sum override failed', e); }
       window.__mtKeyConfLast.bestPossibleWpm = bestWpm;
     } else if (!window.__mtKeyConfLast.replacements) {
       window.__mtKeyConfLast.replacements = [];
@@ -12447,7 +12546,7 @@
         <button id="kc-clear-int">Clear interval records</button>
         <button id="kc-debug">Debug last</button>
         <button id="kc-wpm-debug">WPM replacements</button>
-        <button id="kc-encode-claim" title="Encode last test text + theoretical best time">Race</button>
+        <button id="kc-encode-claim" title="Race: copy claim / race competitor">Race</button>
         <button id="kc-slot-debug">Export slot debug</button>
         <button id="kc-shrink" title="Collapse panel body">Shrink</button>
         <button id="kc-test-best" title="Estimate best WPM for arbitrary text using your digraph records">Test your best</button>
@@ -13091,37 +13190,90 @@
       return '';
     }
 
+    function digraphSumMsForText(text) {
+      // Same logic as race buildYouDelays — pure digraph DB sum (integer ms)
+      const seq = Array.from(String(text || ''));
+      if (seq.length < 2) return null;
+      let total = 0;
+      for (let i = 1; i < seq.length; i++) {
+        const prev = seq[i - 1], cur = seq[i];
+        let ms = null;
+        try {
+          const pk = (typeof pairKey === 'function')
+            ? pairKey(prev, cur)
+            : ((prev === ' ' ? 'spc' : prev) + '\u2192' + (cur === ' ' ? 'spc' : cur));
+          const rec = intervalBest[pk];
+          if (rec != null && isFinite(rec) && rec >= MIN_DIGRAPH_MS && rec <= MAX_DIGRAPH_MS) {
+            ms = Number(rec);
+          } else if (typeof estimateSecondCharMs === 'function') {
+            ms = estimateSecondCharMs(cur);
+          }
+        } catch (e) { ms = null; }
+        if (!(ms != null && isFinite(ms) && ms > 0)) ms = 80;
+        total += Math.round(Number(ms));
+      }
+      return Math.round(total);
+    }
+
     function getTheoreticalBestTimeSec() {
-      try {
-        const last = window.__mtKeyConfLast;
-        const bp = last && last.bestPossibleWpm;
-        if (!bp) return null;
-        // Prefer integer theoreticalMs — exact ms, no float drift
-        if (bp.theoreticalMs != null && isFinite(bp.theoreticalMs)) {
-          return Math.round(Number(bp.theoreticalMs)) / 1000;
-        }
-        if (bp.timeSec != null && isFinite(bp.timeSec)) {
-          return Math.round(Number(bp.timeSec) * 1000) / 1000;
-        }
-      } catch (e) {}
-      return null;
+      const ms = getTheoreticalBestTimeMs();
+      return ms != null ? ms / 1000 : null;
     }
     function getTheoreticalBestTimeMs() {
       try {
+        // Prefer live digraph sum on last result text (matches Race "You" exactly)
+        const text = (typeof getLastResultText === 'function') ? getLastResultText() : '';
+        if (text && text.length >= 2) {
+          const sum = digraphSumMsForText(text);
+          if (sum != null && sum > 0) return sum;
+        }
         const last = window.__mtKeyConfLast;
         const bp = last && last.bestPossibleWpm;
-        if (!bp) return null;
-        if (bp.theoreticalMs != null && isFinite(bp.theoreticalMs)) {
+        if (bp && bp.theoreticalMs != null && isFinite(bp.theoreticalMs)) {
           return Math.round(Number(bp.theoreticalMs));
         }
-        if (bp.timeSec != null && isFinite(bp.timeSec)) {
+        if (bp && bp.timeSec != null && isFinite(bp.timeSec)) {
           return Math.round(Number(bp.timeSec) * 1000);
         }
       } catch (e) {}
       return null;
     }
 
+    
+    function isMtLoggedIn() {
+      try {
+        // Monkeytype sets body class or account button
+        if (document.querySelector('button.signOutEni, .signOutOnly, a[href*="logout"], button[aria-label*="Account"]')) return true;
+        // Username visible (not "guest")
+        const nameEl = document.querySelector('.view-account .name, #header .user .name, header .account .text, .top .account .text');
+        if (nameEl) {
+          const n = (nameEl.textContent || '').trim().toLowerCase();
+          if (n && n !== 'guest' && n !== 'sign in' && n !== 'login') return true;
+        }
+        // Firebase auth keys in localStorage
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i) || '';
+          if (k.indexOf('firebase:authUser') === 0) {
+            const v = localStorage.getItem(k);
+            if (v && v.length > 20 && v.indexOf('"uid"') >= 0) return true;
+          }
+        }
+        // Sign-in button visible → logged out
+        const signIn = document.querySelector('button.signInOut, .login, a[href*="login"]');
+        if (signIn && /sign\s*in|log\s*in/i.test(signIn.textContent || '')) return false;
+      } catch (e) {}
+      return null;
+    }
+
     function openEncodeClaimModal() {
+      try {
+        const logged = isMtLoggedIn();
+        if (logged === false) {
+          try { showToast('Create or log into a Monkeytype account — races & claims work best while logged in.', 'warning', 5000); } catch (e) {
+            alert('Please create or log into a Monkeytype account.');
+          }
+        }
+      } catch (e) {}
       let modal = document.getElementById('kc-claim-modal');
       if (modal) {
         modal.style.display = 'flex';
@@ -13146,7 +13298,7 @@
       modal.innerHTML = `
         <div style="background:var(--bg-color,#323437);color:var(--text-color,#d1d0c5);border:1px solid var(--sub-color,#646669);border-radius:12px;max-width:880px;width:100%;max-height:92vh;overflow:auto;padding:18px 20px;box-shadow:0 16px 48px rgba(0,0,0,.5);box-sizing:border-box">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-            <strong style="color:var(--main-color,#e2b714);font-size:1.1rem;letter-spacing:.02em">Encode</strong>
+            <strong style="color:var(--main-color,#e2b714);font-size:1.1rem;letter-spacing:.02em">Race</strong>
             <button type="button" id="kc-cl-close" style="background:transparent;border:none;color:var(--text-color);font-size:1.3rem;cursor:pointer;line-height:1;opacity:.8">×</button>
           </div>
           <p style="font-size:0.78rem;opacity:.75;margin:0 0 12px;line-height:1.4">Last result text + theoretical best time. Copy packs both into one line.</p>
@@ -13164,6 +13316,7 @@
               <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center">
                 <button type="button" id="kc-cl-race" style="background:var(--main-color,#e2b714);color:#111;border:none;border-radius:8px;padding:7px 16px;font-weight:700;cursor:pointer;font-size:0.9rem">Race</button>
                 <button type="button" id="kc-cl-quick" style="background:var(--sub-alt-color,#2c2e31);color:var(--main-color,#e2b714);border:1px solid var(--sub-color,#646669);border-radius:8px;padding:7px 14px;cursor:pointer;font-size:0.88rem">Quick race</button>
+                <button type="button" id="kc-cl-import" style="background:var(--sub-alt-color,#2c2e31);color:var(--text-color,#d1d0c5);border:1px solid var(--sub-color,#646669);border-radius:8px;padding:7px 14px;cursor:pointer;font-size:0.88rem">Import</button>
               </div>
               <div id="kc-cl-race-err" style="margin-top:6px;font-size:0.76rem;color:#e06c75;min-height:1.1em"></div>
               <div id="kc-cl-quick-out" style="margin-top:4px;font-size:0.84rem;opacity:.95"></div>
@@ -13248,8 +13401,12 @@
           try {
             clip = (e.clipboardData || window.clipboardData).getData('text') || '';
           } catch (err) {}
-          // Replace entire field (never append into a huge old paste)
-          chIn.value = String(clip).trim();
+          clip = String(clip)
+            .replace(/[\u200B-\u200D\uFEFF]/g, '')
+            .replace(/[\r\n\t]+/g, '')
+            .replace(/\s+/g, '')
+            .trim();
+          chIn.value = clip;
         });
         chIn.addEventListener('focus', () => {
           // Select all so next paste/type replaces
@@ -13296,37 +13453,47 @@
         raceRafs = [];
       }
 
-      function buildYouDelays(seq, targetMs) {
+      function buildYouDelays(seq) {
+        // Your digraph records on THIS text (competitor text). No scaling to last test.
+        // Missing pairs estimated from average *→secondChar. Returns { delays, totalMs, matched, guessed, digraphs }.
         const n = seq.length;
-        if (n < 2) return [0];
-        let delays = [0];
-        let rawSum = 0;
+        if (n < 2) {
+          return { delays: [0], totalMs: 0, matched: 0, guessed: 0, digraphs: 0 };
+        }
+        const delays = [0];
+        let totalMs = 0;
+        let matched = 0;
+        let guessed = 0;
         for (let i = 1; i < n; i++) {
           const prev = seq[i - 1], cur = seq[i];
           let ms = null;
+          let isMatch = false;
           try {
             const pk = (typeof pairKey === 'function')
               ? pairKey(prev, cur)
               : ((prev === ' ' ? 'spc' : prev) + '\u2192' + (cur === ' ' ? 'spc' : cur));
-            ms = intervalBest[pk];
-            if (!(ms != null && isFinite(ms) && ms >= MIN_DIGRAPH_MS && ms <= MAX_DIGRAPH_MS)) {
-              ms = (typeof estimateSecondCharMs === 'function') ? estimateSecondCharMs(cur) : null;
+            const rec = intervalBest[pk];
+            if (rec != null && isFinite(rec) && rec >= MIN_DIGRAPH_MS && rec <= MAX_DIGRAPH_MS) {
+              ms = Number(rec);
+              isMatch = true;
+            } else if (typeof estimateSecondCharMs === 'function') {
+              ms = estimateSecondCharMs(cur);
             }
           } catch (e) { ms = null; }
           if (!(ms != null && isFinite(ms) && ms > 0)) ms = 80;
-          delays.push(Number(ms));
-          rawSum += Number(ms);
+          ms = Math.round(Number(ms));
+          delays.push(ms);
+          totalMs += ms;
+          if (isMatch) matched++;
+          else guessed++;
         }
-        if (rawSum <= 0) {
-          const per = targetMs / (n - 1);
-          return seq.map((_, i) => i === 0 ? 0 : per);
-        }
-        const scale = targetMs / rawSum;
-        const scaled = delays.map((d, i) => i === 0 ? 0 : d * scale);
-        let s = 0;
-        for (let i = 1; i < scaled.length; i++) s += scaled[i];
-        scaled[scaled.length - 1] += (targetMs - s);
-        return scaled;
+        return {
+          delays,
+          totalMs: Math.round(totalMs),
+          matched,
+          guessed,
+          digraphs: n - 1
+        };
       }
 
       function buildEvenDelays(seq, targetMs) {
@@ -13359,6 +13526,46 @@
         return '<b style="color:#e06c75">Loss</b>';
       }
 
+      
+      const importBtn = modal.querySelector('#kc-cl-import');
+      if (importBtn) {
+        importBtn.onclick = async () => {
+          const errEl = modal.querySelector('#kc-cl-race-err');
+          const chIn = modal.querySelector('#kc-cl-challenger');
+          if (errEl) errEl.textContent = '';
+          try {
+            let clip = '';
+            try {
+              clip = await navigator.clipboard.readText();
+            } catch (e1) {
+              clip = prompt('Paste competitor claim line:') || '';
+            }
+            clip = String(clip)
+              .replace(/[\u200B-\u200D\uFEFF]/g, '')
+              .replace(/[\r\n\t]+/g, '')
+              .replace(/\s+/g, '')
+              .trim();
+            if (!clip) {
+              if (errEl) errEl.textContent = 'Clipboard empty.';
+              return;
+            }
+            if (chIn) {
+              chIn.value = clip;
+              chIn.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+            try {
+              const d = decodeClaim(clip);
+              if (errEl) errEl.textContent = '';
+              try { showToast('Imported · ' + d.text.length + ' chars · ' + (d.timeMs / 1000).toFixed(3) + 's', 'success', 2000); } catch (e) {}
+            } catch (de) {
+              if (errEl) errEl.textContent = 'Imported but invalid: ' + (de && de.message ? de.message : de);
+            }
+          } catch (err) {
+            if (errEl) errEl.textContent = 'Import failed: ' + (err && err.message ? err.message : err);
+          }
+        };
+      }
+
       modal.querySelector('#kc-cl-quick').onclick = () => {
         const errEl = modal.querySelector('#kc-cl-race-err');
         const qOut = modal.querySelector('#kc-cl-quick-out');
@@ -13371,27 +13578,32 @@
           errEl.textContent = 'Him: ' + (err && err.message ? err.message : err);
           return;
         }
-        let myMs = (typeof getTheoreticalBestTimeMs === 'function') ? getTheoreticalBestTimeMs() : null;
-        if (myMs == null) {
-          const t = getTheoreticalBestTimeSec() != null ? getTheoreticalBestTimeSec() : _claimTimeSec;
-          if (t != null && isFinite(t) && t > 0) myMs = Math.round(Number(t) * 1000);
-        } else myMs = Math.round(myMs);
-        if (myMs == null || !isFinite(myMs) || myMs <= 0) {
-          errEl.textContent = 'Missing your theoretical best time.';
+        const text = him.text || '';
+        const chMs = Math.round(Number(him.timeMs));
+        if (!text || !isFinite(chMs) || chMs <= 0) {
+          errEl.textContent = 'Invalid competitor claim.';
           return;
         }
-        const chMs = Math.round(Number(him.timeMs));
+        const seq = Array.from(text);
+        const youBuild = buildYouDelays(seq);
+        const myMs = youBuild.totalMs;
+        if (!myMs || myMs <= 0) {
+          errEl.textContent = 'Could not build digraph times for this text.';
+          return;
+        }
         const myTime = myMs / 1000;
         const chTime = chMs / 1000;
-        const text = him.text || '';
         const myWpm = text.length ? (text.length / 5) / (myTime / 60) : 0;
         const chWpm = text.length ? (text.length / 5) / (chTime / 60) : 0;
         const w = winnerLabel(myMs, chMs);
         const marginMs = Math.abs(myMs - chMs);
+        const matchPct = youBuild.digraphs > 0 ? (100 * youBuild.matched / youBuild.digraphs) : 0;
         qOut.innerHTML = '<b>Quick race</b><br>' +
           'You: <b>' + myTime.toFixed(3) + 's</b> ≈ ' + myWpm.toFixed(3) + ' wpm<br>' +
           'Him: <b>' + chTime.toFixed(3) + 's</b> ≈ ' + chWpm.toFixed(3) + ' wpm<br>' +
-          winnerHtml(w) + (w === 'Tie' ? '' : (' by ' + marginMs + ' ms'));
+          winnerHtml(w) + (w === 'Tie' ? '' : (' by ' + marginMs + ' ms')) +
+          '<br><span style="opacity:.7;font-size:0.78rem">digraph match ' + matchPct.toFixed(1) +
+          '% (' + youBuild.matched + '/' + youBuild.digraphs + ' real · ' + youBuild.guessed + ' estimated)</span>';
       };
 
       modal.querySelector('#kc-cl-race').onclick = () => {
@@ -13405,20 +13617,24 @@
           errEl.textContent = 'Him: ' + (err && err.message ? err.message : err);
           return;
         }
-        let myTargetMs = (typeof getTheoreticalBestTimeMs === 'function') ? getTheoreticalBestTimeMs() : null;
-        if (myTargetMs == null) {
-          const myTime = getTheoreticalBestTimeSec() != null ? getTheoreticalBestTimeSec() : _claimTimeSec;
-          if (myTime != null && isFinite(myTime) && myTime > 0) myTargetMs = Math.round(Number(myTime) * 1000);
-        } else {
-          myTargetMs = Math.round(myTargetMs);
-        }
-        if (myTargetMs == null || !isFinite(myTargetMs) || myTargetMs <= 0) {
-          errEl.textContent = 'Missing your theoretical best time.';
-          return;
-        }
         const text = him.text;
         const chTargetMs = Math.round(Number(him.timeMs));
+        if (!text || !isFinite(chTargetMs) || chTargetMs <= 0) {
+          errEl.textContent = 'Invalid competitor claim.';
+          return;
+        }
         const seq = Array.from(text);
+
+        // Your pace on HIS text from digraph DB (estimate missing *→char)
+        const youBuild = buildYouDelays(seq);
+        const myTargetMs = youBuild.totalMs;
+        if (!myTargetMs || myTargetMs <= 0) {
+          errEl.textContent = 'Could not build digraph times for this text.';
+          return;
+        }
+        const matchPct = youBuild.digraphs > 0
+          ? (100 * youBuild.matched / youBuild.digraphs)
+          : 0;
 
         const box = modal.querySelector('#kc-cl-race-box');
         box.style.display = 'block';
@@ -13428,7 +13644,7 @@
         youEl.innerHTML = '';
         chEl.innerHTML = '';
 
-        const youDelays = buildYouDelays(seq, myTargetMs);
+        const youDelays = youBuild.delays;
         const chDelays = buildEvenDelays(seq, chTargetMs);
         const youAbs = delaysToAbsTimes(youDelays);
         const chAbs = delaysToAbsTimes(chDelays);
@@ -13494,7 +13710,10 @@
             const w = winnerLabel(y, c);
             st.innerHTML = 'You <b>' + (y / 1000).toFixed(3) + 's</b> (≈' + yw.toFixed(3) + ' wpm) · ' +
               'Him <b>' + (c / 1000).toFixed(3) + 's</b> (≈' + cw.toFixed(3) + ' wpm) · ' +
-              winnerHtml(w);
+              winnerHtml(w) +
+              '<br><span style="opacity:.7;font-size:0.78rem">digraph match ' +
+              matchPct.toFixed(1) + '% (' + youBuild.matched + '/' + youBuild.digraphs +
+              ' real · ' + youBuild.guessed + ' estimated)</span>';
           }
         }
         st.textContent = 'Racing…';
@@ -13602,5 +13821,5 @@
     return info;
   };
 
-console.log('[KeyConf] v2.2.50 ready \u2014', WORD_BANKS.reduce((n,b)=>n+b.length,0), 'words in', WORD_BANKS.length, 'shards');
+console.log('[KeyConf] v2.2.54 ready \u2014', WORD_BANKS.reduce((n,b)=>n+b.length,0), 'words in', WORD_BANKS.length, 'shards');
 })();
