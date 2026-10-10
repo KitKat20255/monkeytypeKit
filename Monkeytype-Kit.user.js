@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Monkeytype Kit Full (Archive + Jail + Hotlist + Dictation + Key Confidence)
 // @namespace    https://monkeytype.com/kit
-// @version      2.2.33
+// @version      2.2.34
 // @description  Bundle: Eternal Archive, Jail, Hotlist, Dictation, Key Confidence + Best WPM. Single Ape Key in Archive panel.
 // @author       kitkat + Grok
 // @match        https://monkeytype.com/*
@@ -3925,8 +3925,8 @@
             title: { display: true, text: 'Test # (filtered chronological)', color: '#888' },
             ticks: { color: '#888', maxTicksLimit: 12 },
             grid: { color: 'rgba(255,255,255,0.05)' },
-            // Keep same right gap for last-day (few points) as all-time/week
-            min: results.length ? -0.5 : 0,
+            // Start at test #0 (not -0.5)
+            min: 0,
             max: (function () {
               const n = results.length;
               if (!n) return 1;
@@ -5555,11 +5555,25 @@
   function uniqueIndexTicks(labels) {
     return {
       color: '#888',
-      autoSkip: false,
+      autoSkip: true,
       maxRotation: 45,
+      // Always show first day/month label (Chart.js often skips edge ticks)
+      afterBuildTicks: function (axis) {
+        try {
+          const n = labels.length;
+          if (!n) return;
+          const have = new Set((axis.ticks || []).map(t => Math.round(t.value)));
+          const add = [];
+          if (!have.has(0)) add.push({ value: 0 });
+          if (n > 1 && !have.has(n - 1)) add.push({ value: n - 1 });
+          if (add.length) {
+            axis.ticks = (axis.ticks || []).concat(add).sort((a, b) => a.value - b.value);
+          }
+        } catch (e) {}
+      },
       callback: function (val) {
         const i = Math.round(val);
-        if (i !== val) return '';           // skip non-integer positions
+        if (Math.abs(i - val) > 1e-6) return '';
         if (i < 0 || i >= labels.length) return '';
         return labels[i];
       }
@@ -5714,7 +5728,7 @@
         scales: {
           x: {
             type: 'linear',
-            min: -0.5,
+            min: 0,
             max: Math.max(points.length - 1 + Math.max(2, Math.ceil(points.length * 0.04)), 2),
             title: { display: true, text: xTitle, color: '#888' },
             ticks: uniqueIndexTicks(labels),
@@ -6024,7 +6038,7 @@
         scales: {
           x: {
             type: 'linear',
-            min: -0.5,
+            min: 0,
             max: series.length - 1 + Math.max(2, Math.ceil(series.length * 0.04)),
             title: { display: true, text: 'Block # (each ≈ 10 h effective typing)', color: '#888' },
             ticks: uniqueIndexTicks(labels),
@@ -6415,7 +6429,7 @@
       }, 60000); // check every minute
     }
 
-  console.log('[Monkeytype Eternal Archive] v2.2.33 ready — mode/type + migrate');
+  console.log('[Monkeytype Eternal Archive] v2.2.34 ready — mode/type + migrate');
   }
 
   if (document.readyState === 'loading') {
@@ -12251,5 +12265,5 @@
     return info;
   };
 
-console.log('[KeyConf] v2.2.33 ready \u2014', WORD_BANKS.reduce((n,b)=>n+b.length,0), 'words in', WORD_BANKS.length, 'shards');
+console.log('[KeyConf] v2.2.34 ready \u2014', WORD_BANKS.reduce((n,b)=>n+b.length,0), 'words in', WORD_BANKS.length, 'shards');
 })();
