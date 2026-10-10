@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Monkeytype Kit Full (Archive + Jail + Hotlist + Dictation + Key Confidence)
 // @namespace    https://monkeytype.com/kit
-// @version      2.2.34
+// @version      2.2.41
 // @description  Bundle: Eternal Archive, Jail, Hotlist, Dictation, Key Confidence + Best WPM. Single Ape Key in Archive panel.
 // @author       kitkat + Grok
 // @match        https://monkeytype.com/*
@@ -451,7 +451,7 @@
     savePendingStumbles(filtered);
   }
 
-
+  
   /** Fallback when MT no longer uses .group classes — parse #result.innerText */
   function scrapeResultFromInnerText() {
     const root = document.querySelector('#result') || document.querySelector('.pageResult');
@@ -476,7 +476,7 @@
     if (!block || block.length < 10) return null;
 
     const out = {};
-    // Collect all wpm candidates; NEVER take a number that is the "100" from "100%"
+    // Collect all wpm candidates; NEVER take a number that is the "100" from "100%" 
     const allWpm = [];
     const re = /\bwpm\b([^\d%]{0,15})(\d+(?:\.\d+)?)(\s*%)?/gi;
     let m;
@@ -534,7 +534,7 @@
     return null;
   }
 
-
+  
   function readWpmFromResultDOM() {
     try {
       const parseNum = (t, min, max) => {
@@ -600,7 +600,7 @@
     }
   }
 
-
+  
   function readNumFromResultGroup(groupClass) {
     try {
       const parseNum = (t) => {
@@ -657,7 +657,7 @@
     } catch (e) { return null; }
   }
 
-
+  
   function readResultGroupMap() {
     // Parse #result .group blocks: { "test type": "quote short english", "tags": "eclipse", ... }
     const map = {};
@@ -2757,7 +2757,7 @@
                 delete chartInstance.options.scales.x.min;
                 delete chartInstance.options.scales.x.max;
               }
-              chartInstance.$eaFullX = null;
+              chartInstance.$eaFullX = null; try { chartInstance.$eaDataX = null; } catch (e2) {}
             } catch (e) {}
           }
           await renderArchive();
@@ -3408,7 +3408,10 @@
     requestAnimationFrame(() => {
       try {
         const x = chart.scales && chart.scales.x;
-        if (x && (x.max - x.min) > 0) chart.$eaFullX = { min: x.min, max: x.max };
+        if (x && (x.max - x.min) > 0) {
+          if (!chart.$eaDataX) chart.$eaDataX = { min: x.min, max: x.max };
+          chart.$eaFullX = chart.$eaDataX;
+        }
       } catch (e) {}
     });
 
@@ -3426,10 +3429,11 @@
         e.stopPropagation();
         const x = chart.scales && chart.scales.x;
         if (!x) return;
-        // Refresh full range if never set or data grew
-        if (!chart.$eaFullX || (x.max - x.min) > (chart.$eaFullX.max - chart.$eaFullX.min + 0.5)) {
-          chart.$eaFullX = { min: x.min, max: x.max };
+        // Fixed data bounds — never take zoomed view as "full range" (that caused infinite zoom-out)
+        if (!chart.$eaDataX || !isFinite(chart.$eaDataX.min) || !isFinite(chart.$eaDataX.max)) {
+          chart.$eaDataX = { min: x.min, max: x.max };
         }
+        chart.$eaFullX = chart.$eaDataX;
         const factor = e.deltaY < 0 ? 1.18 : 1 / 1.18;
         const rect = canvas.getBoundingClientRect();
         const scaleX = (chart.width || rect.width) / (rect.width || 1);
@@ -3441,18 +3445,22 @@
         const curMax = (chart.options.scales && chart.options.scales.x && chart.options.scales.x.max != null)
           ? chart.options.scales.x.max : x.max;
         const range = curMax - curMin;
-        if (!(range > 0)) return;
+        if (!(range > 0) || !isFinite(range)) return;
         let newRange = range / factor;
-        const fullRange = chart.$eaFullX.max - chart.$eaFullX.min;
-        if (newRange > fullRange) newRange = fullRange;
-        if (newRange < Math.max(2, fullRange * 0.015)) newRange = Math.max(2, fullRange * 0.015);
+        const dataRange = Math.max(1e-6, chart.$eaDataX.max - chart.$eaDataX.min);
+        const maxOut = dataRange * 2; // max 2× data width
+        const minIn = Math.max(2, dataRange * 0.015);
+        if (newRange > maxOut) newRange = maxOut;
+        if (newRange < minIn) newRange = minIn;
         const ratio = Math.min(1, Math.max(0, (mouseVal - curMin) / range));
         let nMin = mouseVal - ratio * newRange;
         let nMax = mouseVal + (1 - ratio) * newRange;
-        if (nMin < chart.$eaFullX.min) { nMax += chart.$eaFullX.min - nMin; nMin = chart.$eaFullX.min; }
-        if (nMax > chart.$eaFullX.max) { nMin -= nMax - chart.$eaFullX.max; nMax = chart.$eaFullX.max; }
-        nMin = Math.max(chart.$eaFullX.min, nMin);
-        nMax = Math.min(chart.$eaFullX.max, nMax);
+        const pad = Math.max(0, (newRange - dataRange) / 2);
+        const hardMin = chart.$eaDataX.min - pad;
+        const hardMax = chart.$eaDataX.max + pad;
+        if (nMin < hardMin) { nMax += hardMin - nMin; nMin = hardMin; }
+        if (nMax > hardMax) { nMin -= nMax - hardMax; nMax = hardMax; }
+        if (!(nMax > nMin)) { nMin = hardMin; nMax = hardMax; }
         // Always set options + update (works without zoom plugin / zoomScale)
         if (!chart.options.scales) chart.options.scales = {};
         if (!chart.options.scales.x) chart.options.scales.x = { type: 'linear' };
@@ -3477,14 +3485,13 @@
       if (chart.$eaDestroyed) return;
       const x = chart.scales && chart.scales.x;
       if (!x) return;
-      drag = {
-        startClientX: e.clientX,
-        min: (chart.options.scales && chart.options.scales.x && chart.options.scales.x.min != null)
-          ? chart.options.scales.x.min : x.min,
-        max: (chart.options.scales && chart.options.scales.x && chart.options.scales.x.max != null)
-          ? chart.options.scales.x.max : x.max
-      };
-      if (!chart.$eaFullX) chart.$eaFullX = { min: x.min, max: x.max };
+      const curMin = (chart.options.scales && chart.options.scales.x && chart.options.scales.x.min != null)
+        ? chart.options.scales.x.min : x.min;
+      const curMax = (chart.options.scales && chart.options.scales.x && chart.options.scales.x.max != null)
+        ? chart.options.scales.x.max : x.max;
+      drag = { startClientX: e.clientX, min: curMin, max: curMax };
+      if (!chart.$eaDataX) chart.$eaDataX = { min: x.min, max: x.max };
+      chart.$eaFullX = chart.$eaDataX;
       canvas.style.cursor = 'grabbing';
       e.preventDefault();
     };
@@ -3494,17 +3501,26 @@
       const x = chart.scales && chart.scales.x;
       if (!x || !rect.width) return;
       const range = drag.max - drag.min;
+      if (!(range > 0)) return;
       const dxPx = e.clientX - drag.startClientX;
       const dxVal = -(dxPx / rect.width) * range;
       let nMin = drag.min + dxVal;
       let nMax = drag.max + dxVal;
-      const full = chart.$eaFullX;
-      if (full) {
-        if (nMin < full.min) { nMax += full.min - nMin; nMin = full.min; }
-        if (nMax > full.max) { nMin -= nMax - full.max; nMax = full.max; }
-        nMin = Math.max(full.min, nMin);
-        nMax = Math.min(full.max, nMax);
+      const bounds = chart.$eaDataX || chart.$eaFullX;
+      if (bounds && isFinite(bounds.min) && isFinite(bounds.max)) {
+        if (nMin < bounds.min) { nMax += bounds.min - nMin; nMin = bounds.min; }
+        if (nMax > bounds.max) { nMin -= nMax - bounds.max; nMax = bounds.max; }
+        nMin = Math.max(bounds.min, nMin);
+        nMax = Math.min(bounds.max, nMax);
+        // Snap to exact data edges to avoid 0.0000000001 tick labels
+        const eps = Math.max(1e-9, (bounds.max - bounds.min) * 1e-9);
+        if (Math.abs(nMin - bounds.min) < eps) nMin = bounds.min;
+        if (Math.abs(nMax - bounds.max) < eps) nMax = bounds.max;
       }
+      // Clean float noise for tick formatting
+      nMin = Math.round(nMin * 1e6) / 1e6;
+      nMax = Math.round(nMax * 1e6) / 1e6;
+      if (!(nMax > nMin)) return;
       if (!chart.options.scales) chart.options.scales = {};
       if (!chart.options.scales.x) chart.options.scales.x = { type: 'linear' };
       chart.options.scales.x.min = nMin;
@@ -3923,7 +3939,17 @@
           x: {
             type: 'linear',
             title: { display: true, text: 'Test # (filtered chronological)', color: '#888' },
-            ticks: { color: '#888', maxTicksLimit: 12 },
+            ticks: {
+              color: '#888',
+              maxTicksLimit: 12,
+              callback: function (v) {
+                if (!isFinite(v)) return '';
+                const r = Math.round(v);
+                if (Math.abs(v - r) < 1e-6) return String(r);
+                if (Math.abs(v) < 1e-6) return '0';
+                return Number(v).toFixed(Math.abs(v) >= 10 ? 1 : 2);
+              }
+            },
             grid: { color: 'rgba(255,255,255,0.05)' },
             // Start at test #0 (not -0.5)
             min: 0,
@@ -3982,6 +4008,245 @@
   }
 
   /** Append one matching result to existing per-test chart — O(1), no full refilter */
+
+  function getEaChartByKey(key) {
+    const canvasId = {
+      main: 'ea-graph',
+      daily: 'ea-daily-graph',
+      monthly: 'ea-monthly-graph',
+      improve: 'ea-improve-graph'
+    }[key];
+    if (!canvasId) return null;
+    const el = document.getElementById(canvasId);
+    if (!el) return null;
+    // Chart.js 3+: Chart.getChart(canvas)
+    try {
+      const Chart = getChart();
+      if (Chart && typeof Chart.getChart === 'function') {
+        const c = Chart.getChart(el);
+        if (c) return c;
+      }
+    } catch (e) {}
+    // Fallback: window registry if set
+    try {
+      if (window.__eaCharts && window.__eaCharts[key]) return window.__eaCharts[key];
+    } catch (e) {}
+    // Named instances (same-scope fallbacks)
+    try {
+      if (key === 'main' && typeof chartInstance !== 'undefined' && chartInstance) return chartInstance;
+      if (key === 'daily' && typeof dailyChartInstance !== 'undefined' && dailyChartInstance) return dailyChartInstance;
+      if (key === 'monthly' && typeof monthlyChartInstance !== 'undefined' && monthlyChartInstance) return monthlyChartInstance;
+      if (key === 'improve' && typeof improveChartInstance !== 'undefined' && improveChartInstance) return improveChartInstance;
+    } catch (e) {}
+    return null;
+  }
+
+  function lastFiniteFromDataset(ds) {
+    if (!ds || !ds.data || !ds.data.length) return null;
+    for (let i = ds.data.length - 1; i >= 0; i--) {
+      const p = ds.data[i];
+      const y = (p && typeof p === 'object') ? p.y : p;
+      if (y != null && isFinite(y)) return Number(y);
+    }
+    return null;
+  }
+
+  function isDatasetVisible(chart, ds) {
+    if (!ds || !chart) return false;
+    try {
+      const idx = chart.data.datasets.indexOf(ds);
+      if (idx < 0) return false;
+      // Prefer Chart.js visibility API (legend toggles meta, not always ds.hidden)
+      if (typeof chart.isDatasetVisible === 'function') {
+        return !!chart.isDatasetVisible(idx);
+      }
+      const meta = chart.getDatasetMeta(idx);
+      if (meta) {
+        if (meta.hidden === true) return false;
+        if (meta.hidden === false) return true;
+      }
+    } catch (e) {}
+    return ds.hidden !== true;
+  }
+
+  /** Prefer exact labels in order; labelsPrefer entries may be strings or regex-like matchers */
+  function pickAvgValue(chart, labelsPrefer) {
+    if (!chart || !chart.data || !chart.data.datasets) return null;
+    for (const lab of labelsPrefer) {
+      const ds = chart.data.datasets.find(d => d.label === lab);
+      if (!ds || !isDatasetVisible(chart, ds)) continue;
+      const v = lastFiniteFromDataset(ds);
+      if (v != null && isFinite(v)) return { value: v, label: ds.label, yAxisID: ds.yAxisID || 'y' };
+    }
+    return null;
+  }
+
+  function pickSeriesForScreenshot(chart, kind) {
+    // kind: 'wpm' | 'acc' | 'stumble'
+    // Order matters: avg of 10 first, then avg of 100, then raw/daily/monthly/delta
+    const lists = {
+      wpm: [
+        'Avg of 10 (WPM)',
+        'Avg of 100 (WPM)',
+        'Daily avg WPM',
+        'Monthly avg WPM',
+        'WPM',
+        'Δ WPM vs previous block'
+      ],
+      acc: [
+        'Avg of 10 (Acc)',
+        'Avg of 100 (Acc)',
+        'Daily avg Accuracy',
+        'Monthly avg Accuracy',
+        'Accuracy',
+        'Δ Acc vs previous block'
+      ],
+      stumble: [
+        'Avg of 10 (Stumble %)',
+        'Avg of 100 (Stumble %)',
+        'Stumble %',
+        'Δ Stumble % vs previous block'
+      ]
+    };
+    return pickAvgValue(chart, lists[kind] || []);
+  }
+
+  function scaleForAxis(chart, yAxisID) {
+    if (!chart || !chart.scales) return null;
+    const id = yAxisID || 'y';
+    return chart.scales[id] || chart.scales.y || null;
+  }
+
+  async function screenshotEaChart(key) {
+    const chart = getEaChartByKey(key);
+    if (!chart || !chart.canvas) {
+      try { showToast('Graph not ready', 'error', 2000); } catch (e) { alert('Graph not ready'); }
+      return;
+    }
+    try {
+      // Prefer avg-of-10 when visible; never fall back to unrelated series
+      const wpmInfo = pickSeriesForScreenshot(chart, 'wpm');
+      const accInfo = pickSeriesForScreenshot(chart, 'acc');
+      const stInfo = pickSeriesForScreenshot(chart, 'stumble');
+
+      const src = chart.canvas;
+      const w = src.width;
+      const h = src.height;
+      // Chart.js getPixelForValue is in CSS pixels; canvas is device pixels
+      const dpr = (chart.currentDevicePixelRatio
+        || (chart.width ? (src.width / chart.width) : 1)
+        || window.devicePixelRatio
+        || 1);
+      const out = document.createElement('canvas');
+      out.width = w;
+      out.height = h;
+      const ctx = out.getContext('2d');
+      ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--bg-color').trim() || '#323437';
+      ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(src, 0, 0);
+
+      const yScaleLeft = chart.scales && (chart.scales.y || chart.scales['y']);
+      const yScaleAcc = chart.scales && (chart.scales.y1 || chart.scales['y1']);
+      const yScaleSt = chart.scales && (chart.scales.y2 || chart.scales['y2']);
+      const xScale = chart.scales && chart.scales.x;
+      const leftX = (xScale ? xScale.left : 0) * dpr;
+      const rightX = (xScale ? xScale.right : (chart.width || w / dpr)) * dpr;
+
+      function drawHLine(yVal, scale, color, text, side) {
+        if (yVal == null || !scale || !isFinite(yVal)) return;
+        let pyCss;
+        try { pyCss = scale.getPixelForValue(yVal); } catch (e) { return; }
+        if (!isFinite(pyCss)) return;
+        const py = pyCss * dpr;
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = Math.max(1, 1.25 * dpr);
+        ctx.setLineDash([6 * dpr, 4 * dpr]);
+        ctx.beginPath();
+        ctx.moveTo(leftX, py);
+        ctx.lineTo(rightX, py);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // Side badges (match live crosshair style)
+        const fontPx = Math.max(11, 12 * dpr);
+        ctx.font = 'bold ' + fontPx + 'px ui-sans-serif, system-ui, sans-serif';
+        const tw = ctx.measureText(text).width;
+        const pad = 4 * dpr;
+        const bh = fontPx + 6 * dpr;
+        let bx, by = py - bh / 2;
+        if (side === 'left') {
+          bx = Math.max(2 * dpr, leftX - tw - pad * 3);
+        } else {
+          bx = Math.min(w - tw - pad * 3, rightX + pad);
+        }
+        ctx.fillStyle = 'rgba(20,20,22,0.85)';
+        ctx.beginPath();
+        const r = 4 * dpr;
+        ctx.moveTo(bx + r, by);
+        ctx.arcTo(bx + tw + pad * 2, by, bx + tw + pad * 2, by + bh, r);
+        ctx.arcTo(bx + tw + pad * 2, by + bh, bx, by + bh, r);
+        ctx.arcTo(bx, by + bh, bx, by, r);
+        ctx.arcTo(bx, by, bx + tw + pad * 2, by, r);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = color;
+        ctx.fillText(text, bx + pad, py + fontPx * 0.35);
+        ctx.restore();
+      }
+
+      // Lines at the LAST point of each preferred series, on the correct Y axis
+      if (wpmInfo) {
+        const sc = scaleForAxis(chart, wpmInfo.yAxisID) || yScaleLeft;
+        drawHLine(wpmInfo.value, sc, 'rgba(233, 196, 106, 0.95)',
+          wpmInfo.value.toFixed(2), 'left');
+      }
+      if (accInfo) {
+        const sc = scaleForAxis(chart, accInfo.yAxisID) || yScaleAcc || yScaleLeft;
+        drawHLine(accInfo.value, sc, 'rgba(231, 111, 81, 0.95)',
+          accInfo.value.toFixed(2) + '%', 'right');
+      }
+      if (stInfo) {
+        const sc = scaleForAxis(chart, stInfo.yAxisID) || yScaleSt || yScaleAcc;
+        if (sc) {
+          drawHLine(stInfo.value, sc, 'rgba(100, 180, 255, 0.95)',
+            stInfo.value.toFixed(2) + '%', 'right');
+        }
+      }
+
+      const blob = await new Promise((resolve) => out.toBlob(resolve, 'image/png'));
+      if (!blob) throw new Error('toBlob failed');
+      try {
+        await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+        try { showToast('Screenshot copied to clipboard', 'success', 2200); } catch (e) {}
+      } catch (clipErr) {
+        // Fallback download
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'monkeytype-graph-' + key + '.png';
+        a.click();
+        URL.revokeObjectURL(url);
+        try { showToast('Screenshot downloaded (clipboard blocked)', 'success', 2500); } catch (e) {}
+      }
+    } catch (e) {
+      console.warn('[EA] screenshot', e);
+      try { showToast('Screenshot failed: ' + (e && e.message ? e.message : e), 'error', 3000); } catch (err) {}
+    }
+  }
+
+  function wireScreenshotButtons(root) {
+    if (!root) return;
+    root.querySelectorAll('.ea-ss-btn').forEach((btn) => {
+      btn.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const key = btn.getAttribute('data-ss') || 'main';
+        screenshotEaChart(key);
+      };
+    });
+  }
+
+
   function appendLiveToCharts(r) {
     if (!r) return false;
     try {
@@ -4437,7 +4702,14 @@
       }
       .ea-graph-title {
         font-size: 0.85rem; color: #e2b714; margin: 14px 0 6px; font-weight: 600;
+        display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
       }
+      .ea-ss-btn {
+        font-size: 0.7rem; font-weight: 600; padding: 2px 8px; border-radius: 6px;
+        border: 1px solid var(--sub-color,#646669); cursor: pointer;
+        background: var(--sub-alt-color,#2c2e31); color: var(--main-color,#e2b714);
+      }
+      .ea-ss-btn:hover { outline: 1px solid var(--main-color,#e2b714); }
       .ea-graph-subtitle {
         font-size: 0.75rem; color: #888; margin: -2px 0 6px;
       }
@@ -4664,7 +4936,7 @@
           </div>
           ${buildFilterHTML()}
           <div id="ea-stats"></div>
-          <div class="ea-graph-title">Per-test evolution</div>
+          <div class="ea-graph-title">Per-test evolution <button type="button" class="ea-ss-btn" data-ss="main" title="Copy graph screenshot to clipboard">Screenshot</button></div>
           <div class="ea-chart-frame" id="ea-main-frame">
             <div class="ea-yside left"><span class="ea-smax"></span><span class="ea-cross-val"></span><span class="ea-smin"></span></div>
             <div class="ea-hscroll" id="ea-main-scroll" style="overflow:hidden">
@@ -4674,7 +4946,7 @@
             </div>
             <div class="ea-yside right"><span class="ea-smax"></span><span class="ea-cross-val"></span><span class="ea-cross-val-stumble"></span><span class="ea-smin"></span></div>
           </div>
-          <div class="ea-graph-title">Daily averages (one point per day)</div>
+          <div class="ea-graph-title">Daily averages (one point per day) <button type="button" class="ea-ss-btn" data-ss="daily" title="Copy graph screenshot to clipboard">Screenshot</button></div>
           <div class="ea-chart-frame" id="ea-daily-frame">
             <div class="ea-yside left"><span class="ea-smax"></span><span class="ea-cross-val"></span><span class="ea-smin"></span></div>
             <div class="ea-hscroll" id="ea-daily-scroll">
@@ -4684,7 +4956,7 @@
             </div>
             <div class="ea-yside right"><span class="ea-smax"></span><span class="ea-cross-val"></span><span class="ea-cross-val-stumble"></span><span class="ea-smin"></span></div>
           </div>
-          <div class="ea-graph-title">Monthly averages (one point per month)</div>
+          <div class="ea-graph-title">Monthly averages (one point per month) <button type="button" class="ea-ss-btn" data-ss="monthly" title="Copy graph screenshot to clipboard">Screenshot</button></div>
           <div class="ea-chart-frame" id="ea-monthly-frame">
             <div class="ea-yside left"><span class="ea-smax"></span><span class="ea-cross-val"></span><span class="ea-smin"></span></div>
             <div class="ea-hscroll" id="ea-monthly-scroll">
@@ -4694,7 +4966,7 @@
             </div>
             <div class="ea-yside right"><span class="ea-smax"></span><span class="ea-cross-val"></span><span class="ea-cross-val-stumble"></span><span class="ea-smin"></span></div>
           </div>
-          <div class="ea-graph-title">Improvement rate (Δ WPM per ~10 h effective typing)</div>
+          <div class="ea-graph-title">Improvement rate (Δ WPM per ~10 h effective typing) <button type="button" class="ea-ss-btn" data-ss="improve" title="Copy graph screenshot to clipboard">Screenshot</button></div>
           <div class="ea-graph-subtitle">Sums test durations only. Each block ≈ 10 h of tests. First point is baseline (0). Later points = change vs previous block average.</div>
           <div class="ea-chart-frame" id="ea-improve-frame">
             <div class="ea-yside left"><span class="ea-smax"></span><span class="ea-cross-val"></span><span class="ea-smin"></span></div>
@@ -4768,6 +5040,8 @@
           if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); applyMaxDots(); }
         };
       }
+      try { wireScreenshotButtons(root); } catch (e) {}
+
 
       root.querySelector('#ea-update').onclick = () => syncResults({ silent: false });
       root.querySelector('#ea-import').onclick = importFile;
@@ -5622,7 +5896,7 @@
           {
             label: accLabel,
             data: points.map((d, i) => ({ x: i, y: d.avgAcc == null ? null : Math.max(90, d.avgAcc) })),
-
+            
             backgroundColor: 'rgba(231, 111, 81, 0.85)',
             pointRadius: aggDotRadius,
             pointHoverRadius: dotHoverRadius,
@@ -6399,7 +6673,7 @@
     try { window.__eaReconcileStumbles = _rec; } catch (e) {}
     try { if (typeof unsafeWindow !== 'undefined') unsafeWindow.__eaReconcileStumbles = _rec; } catch (e) {}
     try { globalThis.__eaReconcileStumbles = _rec; } catch (e) {}
-
+  
     // Auto-sync every 6h only when idle (no typing / no test for 60s)
     if (!window.__eaIdleSyncScheduled) {
       window.__eaIdleSyncScheduled = true;
@@ -6429,7 +6703,7 @@
       }, 60000); // check every minute
     }
 
-  console.log('[Monkeytype Eternal Archive] v2.2.34 ready — mode/type + migrate');
+  console.log('[Monkeytype Eternal Archive] v2.2.41 ready — mode/type + migrate');
   }
 
   if (document.readyState === 'loading') {
@@ -9566,7 +9840,8 @@
   const STORAGE_SETTINGS = 'mt_keyconf_settings_v1';
   const IDLE_MS = 10 * 60 * 1000; // 10 min — ignore only true AFK, not slow/correction typing
   const MIN_DIGRAPH_MS = 10;
-  const MAX_DIGRAPH_MS = 800; // longer = pause, not a digraph for best/saved
+  const MAX_DIGRAPH_MS = 3000; // under 3s can set digraph records (new layouts)
+  const PAUSE_LABEL_MS = 10000; // only label as 'pause' if gap > 10s
   // Paste your Monkeytype ape key here to auto-save the "least confident" custom list:
   const APE_KEY = ''; // set via Archive panel only
 
@@ -10482,7 +10757,7 @@
         order: i,
         wordIdx: pos.wordIdx,
         letterIdx: pos.letterIdx,
-        isPause: interval > MAX_DIGRAPH_MS,
+        isPause: interval > PAUSE_LABEL_MS,
         t0: src[i - 1].ts,
         t1: src[i].ts
       });
@@ -10573,7 +10848,7 @@
         order: i,
         wordIdx: cur.wi,
         letterIdx: letterIdx,
-        isPause: interval > MAX_DIGRAPH_MS,
+        isPause: interval > PAUSE_LABEL_MS,
         t0: t0,
         t1: t1
       });
@@ -10853,7 +11128,7 @@
       if (!tr.interval || tr.interval < 1 || tr.interval >= IDLE_MS) continue;
       const pair = (tr.pair != null) ? tr.pair : (tr.prev + '→' + tr.cur);
       const isLucky = !!(tr.isLucky || tr.interval < MIN_DIGRAPH_MS);
-      const isPause = !!(tr.isPause || tr.interval > MAX_DIGRAPH_MS);
+      const isPause = !!(tr.isPause || tr.interval > PAUSE_LABEL_MS);
       const historical = intervalBest[pair] != null ? intervalBest[pair] : null;
       thisTestIntervals.push({
         prev: tr.prev, cur: tr.cur, interval: tr.interval, pair, historical,
@@ -10861,8 +11136,8 @@
         isPause: isPause,
         isLucky: isLucky
       });
-      // Pauses and lucky presses must not set in-test best or DB records
-      if (!isPause && !isLucky) {
+      // Lucky / very slow (>800ms) must not set best records; 10s+ is labeled pause
+      if (!isLucky && tr.interval <= MAX_DIGRAPH_MS) {
         if (!thisTestByPair[pair] || tr.interval < thisTestByPair[pair]) {
           thisTestByPair[pair] = tr.interval;
         }
@@ -11007,7 +11282,7 @@
         continue;
       }
       // Pauses (> MAX): show only — never credit "saved" time vs a normal digraph
-      if (tr.isPause || tr.interval > MAX_DIGRAPH_MS) {
+      if (tr.isPause || tr.interval > PAUSE_LABEL_MS) {
         replacements.push({
           order: ord, pair: tr.pair, thisMs: tr.interval, bestMs: tr.interval,
           saved: 0, source: 'pause',
@@ -11033,13 +11308,19 @@
         saved += delta;
         improved++;
       }
+      let rowSource = '—';
+      if (delta > 0) rowSource = source;
+      else if (tr.interval >= MIN_DIGRAPH_MS && tr.interval <= MAX_DIGRAPH_MS) {
+        // At or setting best pace for this digraph
+        rowSource = 'record';
+      }
       replacements.push({
         order: ord,
         pair: tr.pair,
         thisMs: tr.interval,
         bestMs: better,
         saved: delta,
-        source: delta > 0 ? source : '—',
+        source: rowSource,
         wordIdx: tr.wordIdx,
         letterIdx: tr.letterIdx,
         flatIdx: ord
@@ -11136,6 +11417,38 @@
 
   function clearKcHighlight() {
     document.querySelectorAll('letter.kc-hl, .letter.kc-hl').forEach((el) => el.classList.remove('kc-hl'));
+    document.querySelectorAll('.kc-hl-space').forEach((el) => el.remove());
+  }
+
+  function highlightSpaceBetween(wordEl) {
+    // Overlay on the gap after this word — does NOT insert into the quote text
+    if (!wordEl) return null;
+    const next = wordEl.nextElementSibling;
+    const r1 = wordEl.getBoundingClientRect();
+    if (!r1 || !(r1.width || r1.height)) return null;
+    let left = r1.right;
+    let right = next ? next.getBoundingClientRect().left : r1.right + Math.max(6, r1.height * 0.35);
+    if (!(right > left)) right = left + Math.max(6, r1.height * 0.35);
+    const top = r1.top;
+    const height = r1.height || 18;
+    const marker = document.createElement('div');
+    marker.className = 'kc-hl-space';
+    marker.title = 'space';
+    marker.style.cssText = [
+      'position:fixed',
+      'left:' + left + 'px',
+      'top:' + top + 'px',
+      'width:' + Math.max(4, right - left) + 'px',
+      'height:' + height + 'px',
+      'box-sizing:border-box',
+      'outline:2px solid #e2b714',
+      'background:rgba(226,183,20,0.4)',
+      'border-radius:3px',
+      'pointer-events:none',
+      'z-index:99999'
+    ].join(';');
+    document.body.appendChild(marker);
+    return marker;
   }
 
   function getResultWordElements() {
@@ -11168,25 +11481,37 @@
       return false;
     }
 
-    // Flat expected letters (+ synthetic space slots) on the result page
+    // Flat expected letters + space slots (space points at the word before the gap)
     const flat = [];
     for (let wi = 0; wi < words.length; wi++) {
       const letters = [...words[wi].querySelectorAll('letter, .letter')].filter(
         (l) => !l.classList.contains('extra')
       );
       for (const l of letters) {
-        flat.push({ el: l, ch: (l.textContent || '') });
+        flat.push({ el: l, ch: (l.textContent || ''), isSpace: false });
       }
       if (wi < words.length - 1 && letters.length) {
-        // space between words — highlight last letter of previous word as stand-in
-        flat.push({ el: letters[letters.length - 1], ch: ' ' });
+        flat.push({ el: words[wi], ch: ' ', isSpace: true });
       }
     }
     if (!flat.length) return false;
 
-    const cur = rep.cur;
+    // Prefer the second char of the digraph (the one being timed); pair is "a→b" or "n→spc"
+    let cur = rep.cur;
+    if (rep.pair) {
+      const p = String(rep.pair);
+      let second = null;
+      if (p.includes('→')) second = p.split('→').pop();
+      else if (p.includes('+')) second = p.split('+').pop();
+      else if (p.includes('>')) second = p.split('>').pop();
+      if (second != null && second !== '') {
+        // pair is authoritative for which side of digraph to highlight
+        cur = second;
+      }
+    }
+    if (cur === 'spc' || cur === 'space' || cur === 'SPC') cur = ' ';
+
     let start = (rep.order != null && !isNaN(rep.order)) ? Number(rep.order) : 0;
-    // typeBuf can be longer than expected after errors — clamp then search for matching char
     start = Math.max(0, Math.min(start, flat.length - 1));
 
     let best = start;
@@ -11203,8 +11528,13 @@
 
     const target = flat[best];
     if (!target || !target.el) return false;
-    target.el.classList.add('kc-hl');
-    try { target.el.scrollIntoView({ block: 'nearest', inline: 'center' }); } catch (e) {}
+    if (target.isSpace || target.ch === ' ') {
+      const marker = highlightSpaceBetween(target.el);
+      try { (marker || target.el).scrollIntoView({ block: 'nearest', inline: 'center' }); } catch (e) {}
+    } else {
+      target.el.classList.add('kc-hl');
+      try { target.el.scrollIntoView({ block: 'nearest', inline: 'center' }); } catch (e) {}
+    }
     return true;
   }
 
@@ -11272,14 +11602,25 @@
       '</div>';
     html += '<div class="kc-row" style="opacity:.65;cursor:default">' + escapeHtml(header) + '</div>';
     for (const r of rows) {
+      const src = String(r.source || '');
       const line =
         pad(r.n, wN) + '  ' + pad(r.dig, wDig) + '  ' + pad(r.thisMs, wThis) + '  ' +
-        pad(r.bestMs, wBest) + '  ' + pad(r.saved, wSaved) + '  ' + r.source;
-      const dim = (r.rep.saved === 0) ? ' style="opacity:0.4"' : '';
+        pad(r.bestMs, wBest) + '  ' + pad(r.saved, wSaved) + '  ';
+      // Color source: historical low-contrast; record / in-test high-contrast
+      let srcStyle = 'color:#6b6e70'; // historical / default dim
+      if (src === 'record' || src === 'in-test') {
+        srcStyle = 'color:#f0f0f0;font-weight:700';
+      } else if (src === 'pause' || src === 'lucky press') {
+        srcStyle = 'color:#8a6a3a';
+      } else if (src === 'historical') {
+        srcStyle = 'color:#5c5f62';
+      }
+      const dim = (r.rep.saved === 0 && src !== 'record' && src !== 'in-test') ? 'opacity:0.45;' : '';
       html += '<div class="kc-row" data-order="' + (r.rep.order != null ? r.rep.order : '') + '"' +
         ' data-word="' + (r.rep.wordIdx != null ? r.rep.wordIdx : '') + '"' +
-        ' data-letter="' + (r.rep.letterIdx != null ? r.rep.letterIdx : '') + '"' + dim + '>' +
-        escapeHtml(line) + '</div>';
+        ' data-letter="' + (r.rep.letterIdx != null ? r.rep.letterIdx : '') + '"' +
+        ' style="' + dim + '">' +
+        escapeHtml(line) + '<span style="' + srcStyle + '">' + escapeHtml(src) + '</span></div>';
     }
     box.innerHTML = html;
 
@@ -12102,6 +12443,7 @@
         <button id="kc-wpm-debug">WPM replacements</button>
         <button id="kc-slot-debug">Export slot debug</button>
         <button id="kc-shrink" title="Collapse panel body">Shrink</button>
+        <button id="kc-test-best" title="Estimate best WPM for arbitrary text using your digraph records">Test your best</button>
       </div>
       <div id="kc-debug-out" style="font-size:10px;opacity:.75;margin-top:6px;white-space:pre-wrap;max-height:80px;overflow:auto"></div>
       <div id="mt-keyconf-wpm-debug" style="display:none"></div>
@@ -12184,6 +12526,427 @@
         if (body) body.style.display = collapsed ? 'none' : '';
       };
     }
+
+    function estimateSecondCharMs(curCh) {
+      // Average of all known digraphs *→curCh
+      const times = [];
+      for (const [pair, ms] of Object.entries(intervalBest || {})) {
+        if (ms == null || !isFinite(ms)) continue;
+        if (ms < MIN_DIGRAPH_MS || ms > MAX_DIGRAPH_MS) continue;
+        const parts = String(pair).split('\u2192');
+        if (parts.length !== 2) continue;
+        let c = parts[1];
+        if (c === 'spc') c = ' ';
+        if (c === curCh) times.push(Number(ms));
+      }
+      if (times.length) return times.reduce((a, b) => a + b, 0) / times.length;
+      // Fallback: global average of all digraph records
+      const all = [];
+      for (const ms of Object.values(intervalBest || {})) {
+        if (ms != null && isFinite(ms) && ms >= MIN_DIGRAPH_MS && ms <= MAX_DIGRAPH_MS) all.push(Number(ms));
+      }
+      if (all.length) return all.reduce((a, b) => a + b, 0) / all.length;
+      return 120; // last-resort default 120ms
+    }
+
+    function pairKey(a, b) {
+      const pa = a === ' ' ? 'spc' : a;
+      const pb = b === ' ' ? 'spc' : b;
+      return pa + '\u2192' + pb;
+    }
+
+    function computeBestForText(text) {
+      const chars = Array.from(String(text || ''));
+      // Normalize newlines to spaces, keep other chars
+      const seq = [];
+      for (const ch of chars) {
+        if (ch === '\r') continue;
+        if (ch === '\n' || ch === '\t') seq.push(' ');
+        else seq.push(ch);
+      }
+      // Collapse multiple spaces? Keep as typed for digraph fidelity
+      if (seq.length < 2) {
+        return { ok: false, error: 'Need at least 2 characters' };
+      }
+      let totalMs = 0;
+      let matched = 0;
+      let guessed = 0;
+      const digraphs = seq.length - 1;
+      for (let i = 1; i < seq.length; i++) {
+        const prev = seq[i - 1];
+        const cur = seq[i];
+        const pk = pairKey(prev, cur);
+        let ms = intervalBest[pk];
+        if (ms != null && isFinite(ms) && ms >= MIN_DIGRAPH_MS && ms <= MAX_DIGRAPH_MS) {
+          totalMs += Number(ms);
+          matched++;
+        } else {
+          totalMs += estimateSecondCharMs(cur);
+          guessed++;
+        }
+      }
+      const charsCount = seq.length;
+      const minutes = totalMs / 60000;
+      const wpm = minutes > 0 ? (charsCount / 5) / minutes : 0;
+      const matchPct = digraphs > 0 ? (matched / digraphs) * 100 : 0;
+      return {
+        ok: true,
+        text: seq.join(''),
+        chars: charsCount,
+        digraphs,
+        matched,
+        guessed,
+        totalMs,
+        wpm,
+        matchPct
+      };
+    }
+
+    function openTestYourBestModal() {
+      let modal = document.getElementById('kc-test-best-modal');
+      if (modal) { modal.style.display = 'flex'; return; }
+      modal = document.createElement('div');
+      modal.id = 'kc-test-best-modal';
+      modal.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px;';
+      modal.innerHTML = `
+        <div style="background:var(--bg-color,#323437);color:var(--text-color,#d1d0c5);border:1px solid var(--sub-color,#646669);border-radius:10px;max-width:720px;width:100%;max-height:90vh;overflow:auto;padding:16px;box-shadow:0 12px 40px rgba(0,0,0,.45)">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+            <strong style="color:var(--main-color,#e2b714);font-size:1.05rem">Test your best</strong>
+            <button type="button" id="kc-tb-close" style="background:transparent;border:none;color:var(--text-color);font-size:1.2rem;cursor:pointer">×</button>
+          </div>
+          <p style="font-size:0.8rem;opacity:.8;margin:0 0 8px">Paste or type any text. Uses your best digraph records (&lt;3s). Missing pairs are estimated from how fast you type the second character after other keys.</p>
+          <textarea id="kc-tb-text" rows="8" placeholder="Paste text here…" style="width:100%;box-sizing:border-box;background:var(--sub-alt-color,#2c2e31);color:var(--text-color,#d1d0c5);border:1px solid var(--sub-color,#646669);border-radius:6px;padding:8px;font-family:ui-monospace,monospace;font-size:0.9rem;resize:vertical"></textarea>
+          <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center">
+            <button type="button" id="kc-tb-calc" style="background:var(--main-color,#e2b714);color:#111;border:none;border-radius:6px;padding:6px 12px;font-weight:700;cursor:pointer">Calculate</button>
+            <button type="button" id="kc-tb-ss" style="background:var(--sub-alt-color,#2c2e31);color:var(--main-color,#e2b714);border:1px solid var(--sub-color,#646669);border-radius:6px;padding:6px 12px;cursor:pointer">Screenshot</button>
+            <button type="button" id="kc-tb-play" style="background:var(--sub-alt-color,#2c2e31);color:var(--main-color,#e2b714);border:1px solid var(--sub-color,#646669);border-radius:6px;padding:6px 12px;cursor:pointer">Play</button>
+            <label style="font-size:0.8rem;display:flex;align-items:center;gap:4px">Switch
+              <select id="kc-tb-switch" style="background:var(--sub-alt-color,#2c2e31);color:var(--text-color,#d1d0c5);border:1px solid var(--sub-color,#646669);border-radius:4px;padding:4px 6px">
+                <option value="blue">Clicky Blue</option>
+                <option value="red">Linear Red</option>
+                <option value="brown">Tactile Brown</option>
+                <option value="ink">Ink Black Thock</option>
+                <option value="buckling">Buckling Spring</option>
+                <option value="silent">Silent (no sound)</option>
+              </select>
+            </label>
+            <label style="font-size:0.8rem;display:flex;align-items:center;gap:4px">Vol
+              <input id="kc-tb-vol" type="range" min="0" max="100" value="55" style="width:90px;vertical-align:middle" />
+              <span id="kc-tb-vol-lbl" style="min-width:2em">55</span>
+            </label>
+          </div>
+          <div id="kc-tb-playout" style="margin-top:10px;font-family:ui-monospace,monospace;font-size:1rem;line-height:1.55;min-height:2.5em;white-space:pre-wrap;word-break:break-word;background:var(--sub-alt-color,#2c2e31);border-radius:6px;padding:10px;border:1px solid var(--sub-color,#646669);display:none"></div>
+          <div id="kc-tb-result" style="margin-top:12px;font-size:0.9rem;line-height:1.45;white-space:pre-wrap"></div>
+        </div>`;
+      document.body.appendChild(modal);
+      const close = () => { modal.style.display = 'none'; };
+      modal.querySelector('#kc-tb-close').onclick = close;
+      modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+      modal.querySelector('#kc-tb-calc').onclick = () => {
+        const text = modal.querySelector('#kc-tb-text').value || '';
+        const r = computeBestForText(text);
+        const out = modal.querySelector('#kc-tb-result');
+        if (!r.ok) {
+          out.textContent = r.error || 'Error';
+          out.dataset.payload = '';
+          return;
+        }
+        out.innerHTML = '<div id="kc-tb-ss-card" style="background:var(--sub-alt-color,#2c2e31);border-radius:8px;padding:12px;border:1px solid var(--sub-color,#646669)">'
+          + '<div style="font-size:0.75rem;opacity:.7;margin-bottom:6px">Best possible (your digraph records)</div>'
+          + '<div style="font-size:1.4rem;font-weight:700;color:var(--main-color,#e2b714)">' + r.wpm.toFixed(2) + ' wpm</div>'
+          + '<div style="margin-top:4px">Matching digraphs: <b>' + r.matchPct.toFixed(1) + '%</b> '
+          + '(' + r.matched + '/' + r.digraphs + ' exact, ' + r.guessed + ' estimated)</div>'
+          + '<div style="margin-top:4px;opacity:.8;font-size:0.8rem">' + r.chars + ' chars · ' + (r.totalMs / 1000).toFixed(2) + 's theoretical</div>'
+          + '<div style="margin-top:10px;font-size:0.85rem;max-height:160px;overflow:auto;white-space:pre-wrap;word-break:break-word">'
+          + r.text.replace(/</g, '&lt;').replace(/>/g, '&gt;')
+          + '</div></div>';
+        out.dataset.payload = JSON.stringify({ wpm: r.wpm, matchPct: r.matchPct, matched: r.matched, digraphs: r.digraphs, guessed: r.guessed, chars: r.chars, totalMs: r.totalMs, text: r.text });
+      };
+      modal.querySelector('#kc-tb-ss').onclick = async () => {
+        const card = modal.querySelector('#kc-tb-ss-card');
+        if (!card) {
+          try { showToast('Calculate first', 'error', 2000); } catch (e) { alert('Calculate first'); }
+          return;
+        }
+        try {
+          // Draw a simple canvas screenshot of results + text
+          let payload = {};
+          try { payload = JSON.parse(modal.querySelector('#kc-tb-result').dataset.payload || '{}'); } catch (e) {}
+          const pad = 24;
+          const maxW = 900;
+          const lineH = 22;
+          const text = String(payload.text || '');
+          // wrap text
+          const tmp = document.createElement('canvas').getContext('2d');
+          tmp.font = '16px ui-monospace, monospace';
+          const words = text.split(/(\s+)/);
+          const lines = [];
+          let cur = '';
+          const maxTextW = maxW - pad * 2;
+          for (const w of words) {
+            const trial = cur + w;
+            if (tmp.measureText(trial).width > maxTextW && cur) {
+              lines.push(cur);
+              cur = w.trimStart();
+            } else cur = trial;
+          }
+          if (cur) lines.push(cur);
+          const headerH = 120;
+          const h = headerH + lines.length * lineH + pad * 2;
+          const canvas = document.createElement('canvas');
+          canvas.width = maxW;
+          canvas.height = Math.min(h, 2000);
+          const ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#323437';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.fillStyle = '#e2b714';
+          ctx.font = 'bold 28px ui-sans-serif, system-ui, sans-serif';
+          ctx.fillText((payload.wpm != null ? Number(payload.wpm).toFixed(2) : '—') + ' wpm', pad, pad + 28);
+          ctx.fillStyle = '#d1d0c5';
+          ctx.font = '16px ui-sans-serif, system-ui, sans-serif';
+          ctx.fillText('Matching: ' + (payload.matchPct != null ? Number(payload.matchPct).toFixed(1) : '—') + '%  ('
+            + (payload.matched || 0) + '/' + (payload.digraphs || 0) + ' exact, ' + (payload.guessed || 0) + ' estimated)', pad, pad + 58);
+          ctx.fillStyle = '#a0a0a0';
+          ctx.font = '13px ui-sans-serif, system-ui, sans-serif';
+          ctx.fillText((payload.chars || 0) + ' chars · theoretical ' + ((payload.totalMs || 0) / 1000).toFixed(2) + 's · digraph records < 3s', pad, pad + 82);
+          ctx.strokeStyle = '#646669';
+          ctx.beginPath();
+          ctx.moveTo(pad, headerH - 10);
+          ctx.lineTo(maxW - pad, headerH - 10);
+          ctx.stroke();
+          ctx.fillStyle = '#d1d0c5';
+          ctx.font = '16px ui-monospace, monospace';
+          let y = headerH + 8;
+          for (const line of lines) {
+            if (y > canvas.height - pad) break;
+            ctx.fillText(line, pad, y);
+            y += lineH;
+          }
+          const blob = await new Promise((res) => canvas.toBlob(res, 'image/png'));
+          if (!blob) throw new Error('toBlob failed');
+          try {
+            await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+            try { showToast('Screenshot copied', 'success', 2000); } catch (e) {}
+          } catch (clipErr) {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = 'test-your-best.png'; a.click();
+            URL.revokeObjectURL(url);
+            try { showToast('Screenshot downloaded', 'success', 2000); } catch (e) {}
+          }
+        } catch (err) {
+          console.warn('[KeyConf] test-best ss', err);
+          try { showToast('Screenshot failed', 'error', 2500); } catch (e) {}
+        }
+      };
+    }
+
+
+    // --- Mechanical key sounds (Web Audio, no external files) ---
+    let __kcAudioCtx = null;
+    let __kcPlayTimer = null;
+    let __kcPlayStop = false;
+
+    function kcGetAudio() {
+      if (!__kcAudioCtx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return null;
+        __kcAudioCtx = new AC();
+      }
+      if (__kcAudioCtx.state === 'suspended') {
+        try { __kcAudioCtx.resume(); } catch (e) {}
+      }
+      return __kcAudioCtx;
+    }
+
+    function kcNoiseBuffer(ctx, dur) {
+      const n = Math.max(1, Math.floor(ctx.sampleRate * dur));
+      const buf = ctx.createBuffer(1, n, ctx.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+      return buf;
+    }
+
+    function kcPlayKeySound(switchType, volume) {
+      if (switchType === 'silent' || volume <= 0) return;
+      const ctx = kcGetAudio();
+      if (!ctx) return;
+      const t0 = ctx.currentTime;
+      const vol = Math.max(0, Math.min(1, volume));
+      // Per-key micro variation so it doesn't sound robotic
+      const jitter = 0.85 + Math.random() * 0.3;
+      const pitchJ = 0.92 + Math.random() * 0.16;
+
+      const profiles = {
+        blue:     { noiseDur: 0.018, noiseF: 4200, toneF: 2400, toneDur: 0.035, noiseA: 0.55, toneA: 0.22, type: 'square' },
+        red:      { noiseDur: 0.012, noiseF: 1800, toneF: 380,  toneDur: 0.05,  noiseA: 0.25, toneA: 0.18, type: 'sine' },
+        brown:    { noiseDur: 0.014, noiseF: 2200, toneF: 520,  toneDur: 0.055, noiseA: 0.32, toneA: 0.2,  type: 'triangle' },
+        ink:      { noiseDur: 0.022, noiseF: 900,  toneF: 180,  toneDur: 0.09,  noiseA: 0.4,  toneA: 0.28, type: 'sine' },
+        buckling: { noiseDur: 0.025, noiseF: 3500, toneF: 1100, toneDur: 0.07,  noiseA: 0.5,  toneA: 0.25, type: 'square' }
+      };
+      const p = profiles[switchType] || profiles.blue;
+
+      // Noise click
+      try {
+        const src = ctx.createBufferSource();
+        src.buffer = kcNoiseBuffer(ctx, p.noiseDur * jitter);
+        const filt = ctx.createBiquadFilter();
+        filt.type = 'bandpass';
+        filt.frequency.value = p.noiseF * pitchJ;
+        filt.Q.value = 1.2 + Math.random() * 0.8;
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.0001, t0);
+        g.gain.exponentialRampToValueAtTime(Math.max(0.001, p.noiseA * vol), t0 + 0.001);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + p.noiseDur * jitter);
+        src.connect(filt); filt.connect(g); g.connect(ctx.destination);
+        src.start(t0);
+        src.stop(t0 + p.noiseDur * jitter + 0.02);
+      } catch (e) {}
+
+      // Body tone
+      try {
+        const osc = ctx.createOscillator();
+        osc.type = p.type;
+        osc.frequency.setValueAtTime(p.toneF * pitchJ, t0);
+        osc.frequency.exponentialRampToValueAtTime(Math.max(40, p.toneF * pitchJ * 0.55), t0 + p.toneDur * jitter);
+        const g2 = ctx.createGain();
+        g2.gain.setValueAtTime(0.0001, t0);
+        g2.gain.exponentialRampToValueAtTime(Math.max(0.001, p.toneA * vol), t0 + 0.002);
+        g2.gain.exponentialRampToValueAtTime(0.0001, t0 + p.toneDur * jitter);
+        osc.connect(g2); g2.connect(ctx.destination);
+        osc.start(t0);
+        osc.stop(t0 + p.toneDur * jitter + 0.02);
+      } catch (e) {}
+
+      // Extra high tick for blue / buckling
+      if (switchType === 'blue' || switchType === 'buckling') {
+        try {
+          const osc = ctx.createOscillator();
+          osc.type = 'square';
+          osc.frequency.value = (switchType === 'blue' ? 4800 : 3200) * pitchJ;
+          const g3 = ctx.createGain();
+          g3.gain.setValueAtTime(0.0001, t0);
+          g3.gain.exponentialRampToValueAtTime(Math.max(0.001, 0.12 * vol), t0 + 0.0008);
+          g3.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.012 * jitter);
+          osc.connect(g3); g3.connect(ctx.destination);
+          osc.start(t0);
+          osc.stop(t0 + 0.02);
+        } catch (e) {}
+      }
+    }
+
+    function stopTestBestPlay() {
+      __kcPlayStop = true;
+      if (__kcPlayTimer) {
+        clearTimeout(__kcPlayTimer);
+        __kcPlayTimer = null;
+      }
+      const btn = document.getElementById('kc-tb-play');
+      if (btn) btn.textContent = 'Play';
+    }
+
+    function wireTestBestExtras(modal) {
+      if (!modal || modal.dataset.kcWired === '1') return;
+      modal.dataset.kcWired = '1';
+
+      const vol = modal.querySelector('#kc-tb-vol');
+      const volLbl = modal.querySelector('#kc-tb-vol-lbl');
+      if (vol && volLbl) {
+        vol.oninput = () => { volLbl.textContent = vol.value; };
+      }
+
+      const playBtn = modal.querySelector('#kc-tb-play');
+      if (!playBtn) return;
+      playBtn.onclick = () => {
+        if (playBtn.textContent === 'Stop') {
+          stopTestBestPlay();
+          return;
+        }
+        let payload = {};
+        try {
+          payload = JSON.parse(modal.querySelector('#kc-tb-result').dataset.payload || '{}');
+        } catch (e) {}
+        const text = String(payload.text || modal.querySelector('#kc-tb-text').value || '');
+        if (!text || text.length < 2) {
+          try { showToast('Calculate first', 'error', 2000); } catch (e) { alert('Calculate first'); }
+          return;
+        }
+        // Build per-character delays from digraph best times
+        const r = computeBestForText(text);
+        if (!r.ok) return;
+        const seq = Array.from(r.text);
+        const delays = [0]; // delay before each char (ms), index 0 is first char
+        for (let i = 1; i < seq.length; i++) {
+          const pk = pairKey(seq[i - 1], seq[i]);
+          let ms = intervalBest[pk];
+          if (!(ms != null && isFinite(ms) && ms >= MIN_DIGRAPH_MS && ms <= MAX_DIGRAPH_MS)) {
+            ms = estimateSecondCharMs(seq[i]);
+          }
+          delays.push(Number(ms));
+        }
+
+        const out = modal.querySelector('#kc-tb-playout');
+        if (out) {
+          out.style.display = 'block';
+          out.innerHTML = '';
+        }
+        __kcPlayStop = false;
+        playBtn.textContent = 'Stop';
+        kcGetAudio(); // unlock on user gesture
+
+        let i = 0;
+        const switchType = (modal.querySelector('#kc-tb-switch') || {}).value || 'blue';
+        const volume = ((modal.querySelector('#kc-tb-vol') || {}).value || 55) / 100;
+
+        function step() {
+          if (__kcPlayStop || i >= seq.length) {
+            playBtn.textContent = 'Play';
+            __kcPlayTimer = null;
+            return;
+          }
+          const ch = seq[i];
+          if (out) {
+            const span = document.createElement('span');
+            span.textContent = ch === ' ' ? '\u00a0' : ch;
+            span.style.color = 'var(--main-color,#e2b714)';
+            out.appendChild(span);
+            // dim previous
+            if (out.childNodes.length > 1) {
+              const prev = out.childNodes[out.childNodes.length - 2];
+              if (prev && prev.style) prev.style.color = 'var(--text-color,#d1d0c5)';
+            }
+          }
+          if (ch !== ' ' || true) {
+            kcPlayKeySound(switchType, volume * (ch === ' ' ? 0.85 : 1));
+          }
+          i++;
+          const nextDelay = i < delays.length ? delays[i] : 80;
+          __kcPlayTimer = setTimeout(step, Math.max(12, nextDelay));
+        }
+        // small lead-in
+        __kcPlayTimer = setTimeout(step, 80);
+      };
+    }
+
+    // Patch openTestYourBestModal to wire extras each open
+    const _origOpenTB = openTestYourBestModal;
+    openTestYourBestModal = function() {
+      _origOpenTB();
+      const modal = document.getElementById('kc-test-best-modal');
+      if (modal) {
+        modal.style.display = 'flex';
+        wireTestBestExtras(modal);
+      }
+    };
+
+    const testBestBtn = document.getElementById('kc-test-best');
+    if (testBestBtn) {
+      testBestBtn.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openTestYourBestModal();
+      };
+    }
     refreshPanel();
     positionKeyconfToggle();
     window.addEventListener('resize', positionKeyconfToggle);
@@ -12226,7 +12989,7 @@
     } catch (e) {}
   }, 400);
 
-
+  
   // ---- Debug helpers (console) ----
   window.__kcDebugResult = function () {
     const r = document.getElementById('result');
@@ -12265,5 +13028,5 @@
     return info;
   };
 
-console.log('[KeyConf] v2.2.34 ready \u2014', WORD_BANKS.reduce((n,b)=>n+b.length,0), 'words in', WORD_BANKS.length, 'shards');
+console.log('[KeyConf] v2.2.41 ready \u2014', WORD_BANKS.reduce((n,b)=>n+b.length,0), 'words in', WORD_BANKS.length, 'shards');
 })();
