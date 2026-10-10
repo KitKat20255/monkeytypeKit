@@ -12447,7 +12447,7 @@
         <button id="kc-clear-int">Clear interval records</button>
         <button id="kc-debug">Debug last</button>
         <button id="kc-wpm-debug">WPM replacements</button>
-        <button id="kc-encode-claim" title="Encode last test text + theoretical best time">Encode</button>
+        <button id="kc-encode-claim" title="Encode last test text + theoretical best time">Race</button>
         <button id="kc-slot-debug">Export slot debug</button>
         <button id="kc-shrink" title="Collapse panel body">Shrink</button>
         <button id="kc-test-best" title="Estimate best WPM for arbitrary text using your digraph records">Test your best</button>
