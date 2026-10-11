@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Monkeytype Kit Full (Archive + Jail + Hotlist + Dictation + Key Confidence)
 // @namespace    https://monkeytype.com/kit
-// @version      2.2.54
+// @version      2.2.58
 // @description  Bundle: Eternal Archive, Jail, Hotlist, Dictation, Key Confidence + Best WPM. Single Ape Key in Archive panel.
 // @author       kitkat + Grok
 // @match        https://monkeytype.com/*
@@ -3060,14 +3060,30 @@
     });
 
     if (currentFilters.timePeriod !== 'all') {
-      const periods = {
-        'last day': 864e5,
-        'last week': 6048e5,
-        'last month': 2592e6,
-        'last 3 months': 7776e6
+      // Calendar boundaries in local time (same day-keys as daily/monthly graphs).
+      // "last day" = today since local midnight — matches a single daily-average point.
+      const startOfLocalDay = (d) => {
+        const x = new Date(d);
+        x.setHours(0, 0, 0, 0);
+        return x.getTime();
       };
-      const ms = periods[currentFilters.timePeriod];
-      if (ms) filtered = filtered.filter(r => now - r.timestamp <= ms);
+      const today0 = startOfLocalDay(now);
+      let cutoff = null;
+      if (currentFilters.timePeriod === 'last day') {
+        cutoff = today0;
+      } else if (currentFilters.timePeriod === 'last week') {
+        cutoff = today0 - 6 * 864e5; // today + previous 6 calendar days
+      } else if (currentFilters.timePeriod === 'last month') {
+        cutoff = today0 - 29 * 864e5; // ~30 calendar days
+      } else if (currentFilters.timePeriod === 'last 3 months') {
+        cutoff = today0 - 89 * 864e5;
+      }
+      if (cutoff != null) {
+        filtered = filtered.filter(r => {
+          const ts = (typeof resultTsMs === 'function') ? resultTsMs(r) : (Number(r.timestamp) || 0);
+          return ts >= cutoff;
+        });
+      }
     }
 
     filtered = filtered.filter(r => currentFilters.difficulty[r.difficulty] !== false);
@@ -3690,11 +3706,14 @@
     // Moving avg only over points that have stumble data
     const stumbleForAvg = stumbleData.map(v => (v == null ? NaN : v));
     function movingAvgSparse(data, window) {
+      // Last `window` points that actually have values (skip null/NaN gaps).
+      // So avg-of-100 at the end = mean of the last 100 tests with stumble data,
+      // matching across all-time / week / day filters when those tests are included.
       const out = new Array(data.length).fill(null);
       const useW = !!trueAverage;
       for (let i = 0; i < data.length; i++) {
         let sum = 0, wsum = 0, n = 0;
-        for (let j = Math.max(0, i - window + 1); j <= i; j++) {
+        for (let j = i; j >= 0 && n < window; j--) {
           if (data[j] == null || Number.isNaN(data[j])) continue;
           if (useW) {
             const w = charWeights[j] || 1;
@@ -3702,8 +3721,8 @@
             wsum += w;
           } else {
             sum += data[j];
-            n++;
           }
+          n++;
         }
         out[i] = useW ? (wsum ? sum / wsum : null) : (n ? sum / n : null);
       }
@@ -4682,7 +4701,7 @@
       }
       .ea-hscroll {
         flex: 1 1 auto;
-        overflow-x: auto;
+        overflow-x: hidden;
         overflow-y: hidden;
         position: relative;
         min-width: 0;
@@ -4949,7 +4968,7 @@
           <div class="ea-graph-title">Daily averages (one point per day) <button type="button" class="ea-ss-btn" data-ss="daily" title="Copy graph screenshot to clipboard">Screenshot</button></div>
           <div class="ea-chart-frame" id="ea-daily-frame">
             <div class="ea-yside left"><span class="ea-smax"></span><span class="ea-cross-val"></span><span class="ea-smin"></span></div>
-            <div class="ea-hscroll" id="ea-daily-scroll">
+            <div class="ea-hscroll" id="ea-daily-scroll" style="overflow:hidden">
               <div class="ea-graph-box" id="ea-daily-graph-container">
                 <canvas id="ea-daily-graph"></canvas>
               </div>
@@ -4959,7 +4978,7 @@
           <div class="ea-graph-title">Monthly averages (one point per month) <button type="button" class="ea-ss-btn" data-ss="monthly" title="Copy graph screenshot to clipboard">Screenshot</button></div>
           <div class="ea-chart-frame" id="ea-monthly-frame">
             <div class="ea-yside left"><span class="ea-smax"></span><span class="ea-cross-val"></span><span class="ea-smin"></span></div>
-            <div class="ea-hscroll" id="ea-monthly-scroll">
+            <div class="ea-hscroll" id="ea-monthly-scroll" style="overflow:hidden">
               <div class="ea-graph-box" id="ea-monthly-graph-container">
                 <canvas id="ea-monthly-graph"></canvas>
               </div>
@@ -4970,7 +4989,7 @@
           <div class="ea-graph-subtitle">Sums test durations only. Each block ≈ 10 h of tests. First point is baseline (0). Later points = change vs previous block average.</div>
           <div class="ea-chart-frame" id="ea-improve-frame">
             <div class="ea-yside left"><span class="ea-smax"></span><span class="ea-cross-val"></span><span class="ea-smin"></span></div>
-            <div class="ea-hscroll" id="ea-improve-scroll">
+            <div class="ea-hscroll" id="ea-improve-scroll" style="overflow:hidden">
               <div class="ea-graph-box" id="ea-improve-graph-container">
                 <canvas id="ea-improve-graph"></canvas>
               </div>
@@ -5676,7 +5695,9 @@
   function buildDailyAggregates(results) {
     const byDay = new Map();
     results.forEach(r => {
-      const d = new Date(r.timestamp);
+      const ts = resultTsMs(r);
+      if (!ts) return;
+      const d = new Date(ts);
       const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
       if (!byDay.has(key)) byDay.set(key, []);
       byDay.get(key).push(r);
@@ -5709,7 +5730,9 @@
   function buildMonthlyAggregates(results) {
     const byMonth = new Map();
     results.forEach(r => {
-      const d = new Date(r.timestamp);
+      const ts = resultTsMs(r);
+      if (!ts) return;
+      const d = new Date(ts);
       const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
       if (!byMonth.has(key)) byMonth.set(key, []);
       byMonth.get(key).push(r);
@@ -5867,17 +5890,13 @@
       return null;
     }
 
-    // Compress spacing when many days/months; scrollable; pin to latest
+    // Fit inside frame like main graph — zoom/drag instead of horizontal scroll
     const nPts = points.length;
-    let minPx = 28;
-    if (nPts > 45) minPx = 18;
-    if (nPts > 90) minPx = 12;
-    if (nPts > 150) minPx = 8;
-    if (nPts > 250) minPx = 5;
-    const parentW = (container.parentElement?.clientWidth || container.closest('.ea-hscroll')?.clientWidth || 600) - 16;
-    const width = Math.max(parentW, nPts * minPx);
+    const parentW = (container.parentElement?.clientWidth || container.closest('.ea-hscroll')?.clientWidth || 600) - 8;
+    const width = Math.max(200, parentW);
     container.style.width = width + 'px';
-    container.style.minWidth = width + 'px';
+    container.style.minWidth = '0';
+    container.style.maxWidth = '100%';
 
     const labels = points.map(p => p.shortLabel || p.label);
 
@@ -5971,15 +5990,22 @@
             filter: (item) => !item.dataset.label?.includes('trend'),
             callbacks: {
               title: (items) => {
-                const i = items[0].dataIndex;
-                const d = points[i];
+                const it = items[0];
+                // Prefer x value (day index) — dataIndex breaks if any dataset was sparse
+                let idx = (it.parsed && isFinite(it.parsed.x)) ? Math.round(it.parsed.x)
+                  : (it.raw && isFinite(it.raw.x)) ? Math.round(it.raw.x)
+                  : it.dataIndex;
+                const d = points[idx];
                 if (!d) return '';
                 return `${d.label}  (${d.count} tests)`;
               },
               label: () => null,
               afterBody: (items) => {
-                const i = items[0].dataIndex;
-                const d = points[i];
+                const it = items[0];
+                let idx = (it.parsed && isFinite(it.parsed.x)) ? Math.round(it.parsed.x)
+                  : (it.raw && isFinite(it.raw.x)) ? Math.round(it.raw.x)
+                  : it.dataIndex;
+                const d = points[idx];
                 if (!d) return [];
                 const lines = [
                   `WPM: ${Number(d.avgWpm).toFixed(2)}`,
@@ -6130,12 +6156,11 @@
       return;
     }
 
-    const minPx = 40;
-    const width = Math.max(
-      (container.parentElement?.clientWidth || 600) - 16,
-      series.length * minPx
-    );
+    // Fit inside frame — zoom/drag, no horizontal scrollbar
+    const width = Math.max(200, (container.parentElement?.clientWidth || 600) - 8);
     container.style.width = width + 'px';
+    container.style.minWidth = '0';
+    container.style.maxWidth = '100%';
 
     const labels = series.map(s => s.label); // "1", "2", "3"…
 
@@ -6703,7 +6728,7 @@
       }, 60000); // check every minute
     }
 
-  console.log('[Monkeytype Eternal Archive] v2.2.54 ready — mode/type + migrate');
+  console.log('[Monkeytype Eternal Archive] v2.2.58 ready — mode/type + migrate');
   }
 
   if (document.readyState === 'loading') {
@@ -13821,5 +13846,5 @@
     return info;
   };
 
-console.log('[KeyConf] v2.2.54 ready \u2014', WORD_BANKS.reduce((n,b)=>n+b.length,0), 'words in', WORD_BANKS.length, 'shards');
+console.log('[KeyConf] v2.2.58 ready \u2014', WORD_BANKS.reduce((n,b)=>n+b.length,0), 'words in', WORD_BANKS.length, 'shards');
 })();
