@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Monkeytype Kit Full (Archive + Jail + Hotlist + Dictation + Key Confidence)
 // @namespace    https://monkeytype.com/kit
-// @version      2.2.62
+// @version      2.2.65
 // @description  Bundle: Eternal Archive, Jail, Hotlist, Dictation, Key Confidence + Best WPM. Single Ape Key in Archive panel.
 // @author       kitkat + Grok
 // @match        https://monkeytype.com/*
@@ -1606,7 +1606,17 @@
     r.tags = Array.isArray(r.tags) ? r.tags.map(String) : (r.tags ? [String(r.tags)] : []);
     r.isPb = !!r.isPb;
     r.quoteLength = r.quoteLength;
-    r.testDuration = r.testDuration || Number(r.mode2) || 0;
+    {
+      let td = Number(r.testDuration);
+      if (!(td > 0 && td < 3600)) {
+        // Only time-mode mode2 is duration in seconds
+        if (r.mode === 'time') {
+          const m2 = Number(r.mode2);
+          if (m2 > 0 && m2 <= 3600) td = m2;
+        }
+      }
+      r.testDuration = (td > 0 && td < 3600) ? td : 0;
+    }
     r.restartCount = r.restartCount || 0;
     r.bailedOut = !!r.bailedOut;
     r.blindMode = !!r.blindMode;
@@ -2426,25 +2436,43 @@
       if (dom && dom.wpm) {
         r = dom;
         if (snapNewest && Math.abs(Number(snapNewest.wpm) - Number(dom.wpm)) <= 0.51) {
-          // Same test — keep server id / tags / richer fields
+          // Same test — keep server id / tags; NEVER overwrite DOM quote type with quote-id mode2
           if (snapNewest._id) r._id = snapNewest._id;
           if (snapNewest.id && String(snapNewest.id).length > 8) r.id = snapNewest.id;
           if (snapNewest.tags?.length && !r.tags?.length) r.tags = snapNewest.tags.map(String);
-          if (snapNewest.mode) r.mode = snapNewest.mode;
-          if (snapNewest.mode2 != null) r.mode2 = String(snapNewest.mode2);
-          if (snapNewest.language) r.language = snapNewest.language;
-          if (snapNewest.quoteLength != null) r.quoteLength = snapNewest.quoteLength;
+          if (snapNewest.language && (!r.language || r.language === 'english')) r.language = snapNewest.language;
+          const domQuoteTyped = r.mode === 'quote' && (
+            ['short','medium','long','thicc'].includes(String(r.type || '').toLowerCase()) ||
+            ['short','medium','long','thicc'].includes(String(r.mode2 || '').toLowerCase()) ||
+            [0,1,2,3].includes(Number(r.quoteLength))
+          );
+          if (!r.mode && snapNewest.mode) r.mode = snapNewest.mode;
+          if (!domQuoteTyped) {
+            if (snapNewest.mode2 != null) r.mode2 = String(snapNewest.mode2);
+            if (snapNewest.quoteLength != null) r.quoteLength = snapNewest.quoteLength;
+            if (snapNewest.type && !r.type) r.type = snapNewest.type;
+          } else {
+            // Keep DOM type; still fill missing type string
+            if (!r.type) {
+              const t = String(r.mode2 || '').toLowerCase();
+              if (['short','medium','long','thicc'].includes(t)) r.type = t;
+              else if ([0,1,2,3].includes(Number(r.quoteLength))) {
+                r.type = ({0:'short',1:'medium',2:'long',3:'thicc'})[Number(r.quoteLength)];
+              }
+            }
+          }
+          if (snapNewest.charStats && !r.charStats) r.charStats = snapNewest.charStats;
           if (snapNewest.timestamp) r.timestamp = Number(snapNewest.timestamp) < 1e12
             ? Number(snapNewest.timestamp) * 1000
             : Number(snapNewest.timestamp);
         } else if (snap?.results?.length) {
-          // Find snapshot entry matching on-screen wpm
           const match = snap.results.find(sr => Math.abs(Number(sr.wpm) - Number(dom.wpm)) <= 0.51);
           if (match) {
             const m = normalizeResult(match);
             if (m._id) r._id = m._id;
             if (m.id) r.id = m.id;
-            if (m.tags?.length) r.tags = m.tags.map(String);
+            if (m.tags?.length && !r.tags?.length) r.tags = m.tags.map(String);
+            if (m.charStats && !r.charStats) r.charStats = m.charStats;
             if (m.timestamp) r.timestamp = Number(m.timestamp) < 1e12 ? Number(m.timestamp) * 1000 : Number(m.timestamp);
           }
         }
@@ -2724,7 +2752,47 @@
         _eaLastCaptureAt = now;
       }
 
+      // Ensure quote type before save
+      if (r.mode === 'quote') {
+        const ok = ['short','medium','long','thicc'].includes(String(r.type || '').toLowerCase());
+        if (!ok) {
+          try {
+            const again = readResultFromDOM();
+            if (again) {
+              if (again.type) r.type = again.type;
+              if (again.mode2 && ['short','medium','long','thicc'].includes(String(again.mode2).toLowerCase()))
+                r.mode2 = again.mode2;
+              if (again.quoteLength != null && [0,1,2,3].includes(Number(again.quoteLength)))
+                r.quoteLength = again.quoteLength;
+            }
+          } catch (e) {}
+          if (!['short','medium','long','thicc'].includes(String(r.type || '').toLowerCase())) {
+            if (typeof inferQuoteTypeFromSize === 'function') {
+              const inf = inferQuoteTypeFromSize(r);
+              if (inf) { r.type = inf; r.mode2 = inf; r.quoteLength = ({short:0,medium:1,long:2,thicc:3})[inf]; }
+            }
+          }
+        }
+      }
       await saveResult(r);
+      // If type still missing, one delayed DOM patch (result groups sometimes lag)
+      if (r.mode === 'quote' && !['short','medium','long','thicc'].includes(String(r.type || '').toLowerCase())) {
+        const savedId = r.id;
+        const savedWpm = r.wpm;
+        setTimeout(async () => {
+          try {
+            const again = readResultFromDOM();
+            if (!again || !again.type) return;
+            const all = await getAllResults();
+            const row = all.find(x => x.id === savedId || (Math.abs(Number(x.wpm) - Number(savedWpm)) < 0.05 && String(x.mode) === 'quote'));
+            if (!row || ['short','medium','long','thicc'].includes(String(row.type || '').toLowerCase())) return;
+            row.type = again.type;
+            if (['short','medium','long','thicc'].includes(String(again.mode2 || '').toLowerCase())) row.mode2 = again.mode2;
+            if (again.quoteLength != null) row.quoteLength = again.quoteLength;
+            await saveResult(row);
+          } catch (e) {}
+        }, 600);
+      }
       // Verify it is actually in IndexedDB
       try {
         const all = await getAllResults();
@@ -3242,15 +3310,12 @@
     if (!r) return '—';
     const strTypes = ['short', 'medium', 'long', 'thicc', 'favorite', 'all'];
     if (r.mode === 'quote') {
-      // 1) Explicit type string from result screen / capture
       const t = String(r.type || '').toLowerCase().trim();
-      if (strTypes.includes(t)) return t;
-      // 2) mode2 stored as short/medium/long/thicc
+      if (strTypes.includes(t) && t !== 'favorite' && t !== 'all') return t;
       const m2 = String(r.mode2 || '').toLowerCase().trim();
-      if (strTypes.includes(m2)) return m2;
-      // 3) quoteLength / mode2 numeric: live uses 0–3 (short…thicc)
-      const ql = (r.quoteLength != null && r.quoteLength !== '') ? r.quoteLength : m2;
-      if (ql != null && ql !== '') {
+      if (strTypes.includes(m2) && m2 !== 'favorite' && m2 !== 'all') return m2;
+      const ql = (r.quoteLength != null && r.quoteLength !== '') ? r.quoteLength : null;
+      if (ql != null) {
         if (typeof quoteTypeFromLength === 'function') {
           const qt = quoteTypeFromLength(ql);
           if (qt) return qt;
@@ -3260,6 +3325,10 @@
         if (n === 1) return 'medium';
         if (n === 2) return 'long';
         if (n === 3) return 'thicc';
+      }
+      if (typeof inferQuoteTypeFromSize === 'function') {
+        const inf = inferQuoteTypeFromSize(r);
+        if (inf) return inf;
       }
       return '—';
     }
@@ -3998,12 +4067,16 @@
           tooltip: {
             callbacks: {
               title: (items) => {
+                // Prefer live-updated list so instant-appended points have full tooltips
+                const src = (window.__eaLastFiltered && window.__eaLastFiltered.length)
+                  ? window.__eaLastFiltered : results;
                 const x = items[0].parsed?.x;
-                const realIndex = (typeof x === 'number' && results[Math.round(x)])
+                const realIndex = (typeof x === 'number' && src[Math.round(x)])
                   ? Math.round(x)
-                  : (results.length > MAX_POINTS_DRAW ? drawIndexes[items[0].dataIndex] : items[0].dataIndex);
+                  : (src.length > MAX_POINTS_DRAW && drawIndexes[items[0].dataIndex] != null
+                      ? drawIndexes[items[0].dataIndex] : items[0].dataIndex);
                 {
-                  let ts = Number(results[realIndex]?.timestamp) || 0;
+                  let ts = Number(src[realIndex]?.timestamp) || 0;
                   if (ts && ts < 1e12) ts *= 1000;
                   if (!ts || ts < 946684800000) ts = Date.now();
                   return new Date(ts).toLocaleString();
@@ -4012,11 +4085,14 @@
               // Suppress per-dataset lines — we always show full metrics below
               label: () => null,
               afterBody: (items) => {
+                const src = (window.__eaLastFiltered && window.__eaLastFiltered.length)
+                  ? window.__eaLastFiltered : results;
                 const x = items[0].parsed?.x;
-                const realIndex = (typeof x === 'number' && results[Math.round(x)])
+                const realIndex = (typeof x === 'number' && src[Math.round(x)])
                   ? Math.round(x)
-                  : (results.length > MAX_POINTS_DRAW ? drawIndexes[items[0].dataIndex] : items[0].dataIndex);
-                const r = results[realIndex];
+                  : (src.length > MAX_POINTS_DRAW && drawIndexes[items[0].dataIndex] != null
+                      ? drawIndexes[items[0].dataIndex] : items[0].dataIndex);
+                const r = src[realIndex];
                 if (!r) return [];
                 const nameMap = (typeof window !== 'undefined' && window.__eaTagNameMap) || {};
                 const tagNames = (r.tags || []).map(id => nameMap[String(id)] || id);
@@ -4489,6 +4565,43 @@
         pushAvg('Avg of 100 (Acc)', a100a);
         pushAvg('Avg of 10 (Stumble %)', a10s);
         pushAvg('Avg of 100 (Stumble %)', a100s);
+      } catch (e) {}
+
+      // Expand x-axis so the new point fits with same padding as full Apply render
+      // (max = lastIndex + max(2, 4% of count)) — no full graph rebuild
+      try {
+        const xAxis = chartInstance.options.scales.x;
+        if (xAxis) {
+          const n = (wpmDs && wpmDs.data) ? wpmDs.data.length : (x + 1);
+          const pad = Math.max(2, Math.ceil(n * 0.04));
+          const neededMax = x + pad;
+          const curMax = xAxis.max;
+          const curMaxN = (curMax == null || curMax === 'original') ? null : Number(curMax);
+          if (curMaxN == null || !isFinite(curMaxN) || neededMax > curMaxN) {
+            xAxis.max = neededMax;
+          }
+          // If user was zoomed and the new point is outside the right edge, nudge max only
+          try {
+            const scaleX = chartInstance.scales && chartInstance.scales.x;
+            if (scaleX && typeof scaleX.max === 'number' && x > scaleX.max - 0.5) {
+              xAxis.max = neededMax;
+            }
+          } catch (e2) {}
+        }
+      } catch (e) {}
+
+      // Refresh "Showing N" count if stats bar exists
+      try {
+        const stats = document.getElementById('ea-stats');
+        if (stats && window.__eaLastFiltered) {
+          const n = window.__eaLastFiltered.length;
+          const totalMatch = stats.innerHTML.match(/\/\s*([\d,]+)\s*results/);
+          const total = totalMatch ? totalMatch[1] : String(n);
+          stats.innerHTML = stats.innerHTML.replace(
+            /Showing\s*<b>[\d,]+<\/b>/,
+            'Showing <b>' + n.toLocaleString() + '</b>'
+          );
+        }
       } catch (e) {}
 
       chartInstance.update('none');
