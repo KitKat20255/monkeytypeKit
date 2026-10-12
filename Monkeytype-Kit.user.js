@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Monkeytype Kit Full (Archive + Jail + Hotlist + Dictation + Key Confidence)
 // @namespace    https://monkeytype.com/kit
-// @version      2.2.65
+// @version      2.2.66
 // @description  Bundle: Eternal Archive, Jail, Hotlist, Dictation, Key Confidence + Best WPM. Single Ape Key in Archive panel.
 // @author       kitkat + Grok
 // @match        https://monkeytype.com/*
@@ -4333,11 +4333,11 @@
       const leftX = (xScale ? xScale.left : 0) * dpr;
       const rightX = (xScale ? xScale.right : (chart.width || w / dpr)) * dpr;
 
-      function drawHLine(yVal, scale, color, text, side) {
-        if (yVal == null || !scale || !isFinite(yVal)) return;
+      function drawHLineOnly(yVal, scale, color) {
+        if (yVal == null || !scale || !isFinite(yVal)) return null;
         let pyCss;
-        try { pyCss = scale.getPixelForValue(yVal); } catch (e) { return; }
-        if (!isFinite(pyCss)) return;
+        try { pyCss = scale.getPixelForValue(yVal); } catch (e) { return null; }
+        if (!isFinite(pyCss)) return null;
         const py = pyCss * dpr;
         ctx.save();
         ctx.strokeStyle = color;
@@ -4348,49 +4348,97 @@
         ctx.lineTo(rightX, py);
         ctx.stroke();
         ctx.setLineDash([]);
-        // Side badges (match live crosshair style)
-        const fontPx = Math.max(11, 12 * dpr);
-        ctx.font = 'bold ' + fontPx + 'px ui-sans-serif, system-ui, sans-serif';
+        ctx.restore();
+        return py;
+      }
+
+      function drawBadge(text, color, bx, by, fontPx, pad, bh) {
         const tw = ctx.measureText(text).width;
-        const pad = 4 * dpr;
-        const bh = fontPx + 6 * dpr;
-        let bx, by = py - bh / 2;
-        if (side === 'left') {
-          bx = Math.max(2 * dpr, leftX - tw - pad * 3);
-        } else {
-          bx = Math.min(w - tw - pad * 3, rightX + pad);
-        }
-        ctx.fillStyle = 'rgba(20,20,22,0.85)';
+        ctx.fillStyle = 'rgba(20,20,22,0.9)';
         ctx.beginPath();
-        const r = 4 * dpr;
-        ctx.moveTo(bx + r, by);
-        ctx.arcTo(bx + tw + pad * 2, by, bx + tw + pad * 2, by + bh, r);
-        ctx.arcTo(bx + tw + pad * 2, by + bh, bx, by + bh, r);
-        ctx.arcTo(bx, by + bh, bx, by, r);
-        ctx.arcTo(bx, by, bx + tw + pad * 2, by, r);
+        const rr = 4 * dpr;
+        const bw = tw + pad * 2;
+        ctx.moveTo(bx + rr, by);
+        ctx.arcTo(bx + bw, by, bx + bw, by + bh, rr);
+        ctx.arcTo(bx + bw, by + bh, bx, by + bh, rr);
+        ctx.arcTo(bx, by + bh, bx, by, rr);
+        ctx.arcTo(bx, by, bx + bw, by, rr);
         ctx.closePath();
         ctx.fill();
         ctx.fillStyle = color;
-        ctx.fillText(text, bx + pad, py + fontPx * 0.35);
-        ctx.restore();
+        ctx.fillText(text, bx + pad, by + bh * 0.72);
+        return bw;
       }
 
       // Lines at the LAST point of each preferred series, on the correct Y axis
+      const fontPx = Math.max(11, 12 * dpr);
+      ctx.font = 'bold ' + fontPx + 'px ui-sans-serif, system-ui, sans-serif';
+      const pad = 5 * dpr;
+      const bh = fontPx + 7 * dpr;
+      const gap = 3 * dpr;
+
+      // Left badge (WPM) — keep near left scale with small clearance
       if (wpmInfo) {
         const sc = scaleForAxis(chart, wpmInfo.yAxisID) || yScaleLeft;
-        drawHLine(wpmInfo.value, sc, 'rgba(233, 196, 106, 0.95)',
-          wpmInfo.value.toFixed(2), 'left');
+        const py = drawHLineOnly(wpmInfo.value, sc, 'rgba(233, 196, 106, 0.95)');
+        if (py != null) {
+          const text = wpmInfo.value.toFixed(2);
+          const tw = ctx.measureText(text).width;
+          const bx = Math.max(2 * dpr, leftX - tw - pad * 4);
+          drawBadge(text, 'rgba(233, 196, 106, 0.95)', bx, py - bh / 2, fontPx, pad, bh);
+        }
       }
+
+      // Right badges (acc + stumble): further from scale ticks; stack if they collide
+      const rightItems = [];
       if (accInfo) {
         const sc = scaleForAxis(chart, accInfo.yAxisID) || yScaleAcc || yScaleLeft;
-        drawHLine(accInfo.value, sc, 'rgba(231, 111, 81, 0.95)',
-          accInfo.value.toFixed(2) + '%', 'right');
+        const py = drawHLineOnly(accInfo.value, sc, 'rgba(231, 111, 81, 0.95)');
+        if (py != null) {
+          rightItems.push({
+            py,
+            text: accInfo.value.toFixed(2) + '%',
+            color: 'rgba(231, 111, 81, 0.95)'
+          });
+        }
       }
       if (stInfo) {
         const sc = scaleForAxis(chart, stInfo.yAxisID) || yScaleSt || yScaleAcc;
-        if (sc) {
-          drawHLine(stInfo.value, sc, 'rgba(100, 180, 255, 0.95)',
-            stInfo.value.toFixed(2) + '%', 'right');
+        const py = drawHLineOnly(stInfo.value, sc, 'rgba(100, 180, 255, 0.95)');
+        if (py != null) {
+          rightItems.push({
+            py,
+            text: stInfo.value.toFixed(2) + '%',
+            color: 'rgba(100, 180, 255, 0.95)'
+          });
+        }
+      }
+
+      if (rightItems.length) {
+        // Sort top → bottom
+        rightItems.sort((a, b) => a.py - b.py);
+        // Resolve vertical overlaps by stacking with equal gap
+        for (let i = 1; i < rightItems.length; i++) {
+          const prev = rightItems[i - 1];
+          const cur = rightItems[i];
+          const minPy = prev.py + bh + gap;
+          if (cur.py < minPy) cur.py = minPy;
+        }
+        // If stacking pushed past bottom, shift the whole stack up
+        const last = rightItems[rightItems.length - 1];
+        if (last.py + bh / 2 > h - 2 * dpr) {
+          const overflow = last.py + bh / 2 - (h - 2 * dpr);
+          for (const it of rightItems) it.py -= overflow;
+        }
+        // Shared right column, clear of scale tick labels (~14px past plot edge)
+        const extra = 14 * dpr;
+        let maxTw = 0;
+        for (const it of rightItems) {
+          maxTw = Math.max(maxTw, ctx.measureText(it.text).width);
+        }
+        const bx = Math.min(w - maxTw - pad * 3, rightX + extra);
+        for (const it of rightItems) {
+          drawBadge(it.text, it.color, bx, it.py - bh / 2, fontPx, pad, bh);
         }
       }
 
