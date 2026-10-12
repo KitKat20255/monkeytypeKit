@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Monkeytype Kit Full (Archive + Jail + Hotlist + Dictation + Key Confidence)
 // @namespace    https://monkeytype.com/kit
-// @version      2.2.61
+// @version      2.2.62
 // @description  Bundle: Eternal Archive, Jail, Hotlist, Dictation, Key Confidence + Best WPM. Single Ape Key in Archive panel.
 // @author       kitkat + Grok
 // @match        https://monkeytype.com/*
@@ -746,6 +746,7 @@
     let numbers = false;
     let tags = [];
     let quoteLength = undefined;
+    let resultType = null;
     let difficulty = 'normal';
     let funbox = 'none';
 
@@ -774,16 +775,15 @@
         mode2 = 'zen';
       } else if (/\bquote\b/.test(ttFlat)) {
         mode = 'quote';
-        let qType = null;
-        if (/\bshort\b/.test(ttFlat)) { quoteLength = 0; qType = 'short'; }
-        else if (/\bmedium\b/.test(ttFlat)) { quoteLength = 1; qType = 'medium'; }
-        else if (/\blong\b/.test(ttFlat)) { quoteLength = 2; qType = 'long'; }
-        else if (/\bthicc\b|\bthick\b/.test(ttFlat)) { quoteLength = 3; qType = 'thicc'; }
-        else if (/\bfavou?rite\b/.test(ttFlat)) { quoteLength = -1; qType = 'favorite'; }
-        else if (/\ball\b/.test(ttFlat)) { quoteLength = -1; qType = 'all'; }
-        // Store readable type in mode2 when known (filters/tooltips); keep quoteLength numeric
-        mode2 = qType != null ? qType : String(quoteLength != null ? quoteLength : '-1');
-        try { if (qType) window.__eaCaptureType = qType; } catch (e) {}
+        // Prefer length label on result screen (favorite/all still show short/medium/long/thicc)
+        if (/\bshort\b/.test(ttFlat)) { quoteLength = 0; resultType = 'short'; }
+        else if (/\bmedium\b/.test(ttFlat)) { quoteLength = 1; resultType = 'medium'; }
+        else if (/\blong\b/.test(ttFlat)) { quoteLength = 2; resultType = 'long'; }
+        else if (/\bthicc\b|\bthick\b/.test(ttFlat)) { quoteLength = 3; resultType = 'thicc'; }
+        else if (/\bfavou?rite\b/.test(ttFlat)) { quoteLength = -1; resultType = 'favorite'; }
+        else if (/\ball\b/.test(ttFlat)) { quoteLength = -1; resultType = 'all'; }
+        mode2 = resultType || (quoteLength != null ? String(quoteLength) : 'quote');
+        try { if (resultType) window.__eaCaptureType = resultType; } catch (e) {}
       } else if (/\bwords\b/.test(ttFlat)) {
         mode = 'words';
         const wm = ttFlat.match(/\bwords\b(?:\s*[:x]?\s*|\s+)(\d+)\b/) || ttFlat.match(/\b(10|25|50|100)\b/);
@@ -1026,9 +1026,35 @@
       isPb: !!document.querySelector('#result .group.wpm .badge, #result .pb, #result .crown'),
       testDuration,
       quoteLength,
-      type: (typeof window !== 'undefined' && window.__eaCaptureType) ||
-            (quoteLength === 0 ? 'short' : quoteLength === 1 ? 'medium' :
-             quoteLength === 2 ? 'long' : quoteLength === 3 ? 'thicc' : null),
+      type: (function () {
+        if (resultType && ['short','medium','long','thicc','favorite','all'].includes(resultType)) return resultType;
+        try {
+          const t = window.__eaCaptureType;
+          if (t && ['short','medium','long','thicc'].includes(t)) return t;
+        } catch (e) {}
+        const ql = Number(quoteLength);
+        if (ql === 0) return 'short';
+        if (ql === 1) return 'medium';
+        if (ql === 2) return 'long';
+        if (ql === 3) return 'thicc';
+        const m2 = String(mode2 || '').toLowerCase();
+        if (['short','medium','long','thicc'].includes(m2)) return m2;
+        // Last resort: chars on result screen (MT bands)
+        try {
+          const chEl = document.querySelector('#result .group.char .bottom, #result .group.characters .bottom, .pageResult .group.char .bottom');
+          if (chEl) {
+            const m = String(chEl.textContent || '').match(/(\d+)/);
+            if (m) {
+              const c = parseInt(m[1], 10);
+              if (c < 100) return 'short';
+              if (c < 300) return 'medium';
+              if (c <= 600) return 'long';
+              return 'thicc';
+            }
+          }
+        } catch (e) {}
+        return null;
+      })(),
       _source: 'ea-live-dom'
     };
   }
