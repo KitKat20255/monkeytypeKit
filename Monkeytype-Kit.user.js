@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Monkeytype Kit Full (Archive + Jail + Hotlist + Dictation + Key Confidence)
 // @namespace    https://monkeytype.com/kit
-// @version      2.2.58
+// @version      2.2.59
 // @description  Bundle: Eternal Archive, Jail, Hotlist, Dictation, Key Confidence + Best WPM. Single Ape Key in Archive panel.
 // @author       kitkat + Grok
 // @match        https://monkeytype.com/*
@@ -3166,26 +3166,76 @@
 
   /** Characters typed — weight for true average */
   function resultCharCount(r) {
+    // Character weight for true-average. Must be real test length — never WPM-derived
+    // (that circularly boosts fast tests) and never quote-id / mode2 as duration.
     if (!r) return 1;
     try {
-      if (Array.isArray(r.charStats)) {
+      if (Array.isArray(r.charStats) && r.charStats.length) {
+        // MT: [correct, incorrect, extra, missed] — weight by correct (actual typed length)
+        const correct = Number(r.charStats[0]);
+        if (isFinite(correct) && correct > 0) return correct;
         const sum = r.charStats.reduce((s, n) => s + (Number(n) || 0), 0);
         if (sum > 0) return sum;
       } else if (r.charStats && typeof r.charStats === 'object') {
+        const c = Number(r.charStats.correct ?? r.charStats[0]);
+        if (isFinite(c) && c > 0) return c;
         const sum = Object.values(r.charStats).reduce((s, n) => s + (Number(n) || 0), 0);
         if (sum > 0) return sum;
       }
     } catch (e) {}
-    if (r.characters != null && Number(r.characters) > 0) return Number(r.characters);
-    const dur = resultDurationSec(r);
-    if (dur > 0 && Number(r.wpm) > 0) {
-      return Math.max(1, Number(r.wpm) * 5 * (dur / 60));
+    // CSV / DOM often store "317/0/0/0"
+    if (r.characters != null) {
+      const s = String(r.characters).trim();
+      const m = s.match(/^(\d+)/);
+      if (m) {
+        const n = parseInt(m[1], 10);
+        if (n > 0) return n;
+      }
+      const n = Number(r.characters);
+      if (isFinite(n) && n > 0) return n;
     }
-    if (r.mode === 'words' && Number(r.mode2) > 0) return Number(r.mode2) * 5;
-    if (r.totalWords > 0) return Number(r.totalWords) * 5;
+    if (r.totalWords > 0) return Math.max(1, Number(r.totalWords) * 5);
+    // Words mode: mode2 is word count
+    if (r.mode === 'words') {
+      const m2 = Number(r.mode2);
+      if (isFinite(m2) && m2 > 0 && m2 <= 10000) return m2 * 5;
+    }
+    // Reliable duration only (seconds), not quote ids
+    let dur = Number(r.testDuration);
+    if (!(isFinite(dur) && dur > 0 && dur < 3600)) dur = 0;
+    if (dur > 0 && Number(r.wpm) > 0) {
+      return Math.max(1, Math.round(Number(r.wpm) * 5 * (dur / 60)));
+    }
+    // Missing length → equal weight (same as simple average). Never invent bias.
     return 1;
   }
 
+  function formatResultType(r) {
+    if (!r) return '—';
+    if (r.mode === 'quote') {
+      const ql = r.quoteLength;
+      const map = { 1: 'short', 2: 'medium', 3: 'long', 4: 'thicc', 5: 'all',
+        short: 'short', medium: 'medium', long: 'long', thicc: 'thicc', all: 'all', favorite: 'favorite' };
+      if (ql != null && map[ql] != null) return map[ql];
+      if (r.type && map[String(r.type).toLowerCase()]) return map[String(r.type).toLowerCase()];
+      // mode2 as quote id (large number) is not a type — derive from char count
+      const m2 = String(r.mode2 || '');
+      if (m2 && map[m2.toLowerCase()]) return map[m2.toLowerCase()];
+      if (/^\d+$/.test(m2) && Number(m2) > 20) {
+        const c = resultCharCount(r);
+        if (c >= 550) return 'thicc';
+        if (c >= 350) return 'long';
+        if (c >= 150) return 'medium';
+        if (c > 1) return 'short';
+      }
+      if (m2 && !/^\d+$/.test(m2)) return m2;
+    }
+    if (r.type && !/^\d+$/.test(String(r.type))) return r.type;
+    if (r.mode2 != null && r.mode2 !== '') return String(r.mode2);
+    return '—';
+  }
+
+  
   function weightedMeanFromResults(list, getter) {
     if (!list || !list.length) return null;
     if (!trueAverage) {
@@ -3945,7 +3995,7 @@
                   `Accuracy: ${acc}`,
                   stumbleLine,
                   `Mode: ${r.mode}`,
-                  `Type: ${r.type || r.mode2 || '—'}`,
+                  `Type: ${formatResultType(r)}`,
                   `Lang: ${r.language}`,
                   `Tags: ${tagNames.length ? tagNames.join(', ') : 'none'}`,
                   `Funbox: ${r.funbox && r.funbox !== 'none' ? r.funbox : 'none'}`
@@ -6728,7 +6778,7 @@
       }, 60000); // check every minute
     }
 
-  console.log('[Monkeytype Eternal Archive] v2.2.58 ready — mode/type + migrate');
+  console.log('[Monkeytype Eternal Archive] v2.2.59 ready — mode/type + migrate');
   }
 
   if (document.readyState === 'loading') {
@@ -13846,5 +13896,5 @@
     return info;
   };
 
-console.log('[KeyConf] v2.2.58 ready \u2014', WORD_BANKS.reduce((n,b)=>n+b.length,0), 'words in', WORD_BANKS.length, 'shards');
+console.log('[KeyConf] v2.2.59 ready \u2014', WORD_BANKS.reduce((n,b)=>n+b.length,0), 'words in', WORD_BANKS.length, 'shards');
 })();
