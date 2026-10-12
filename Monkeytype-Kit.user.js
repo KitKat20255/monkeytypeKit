@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Monkeytype Kit Full (Archive + Jail + Hotlist + Dictation + Key Confidence)
 // @namespace    https://monkeytype.com/kit
-// @version      2.2.59
+// @version      2.2.61
 // @description  Bundle: Eternal Archive, Jail, Hotlist, Dictation, Key Confidence + Best WPM. Single Ape Key in Archive panel.
 // @author       kitkat + Grok
 // @match        https://monkeytype.com/*
@@ -510,10 +510,10 @@
 
     if (/\bquote\b/i.test(block)) {
       out.mode = 'quote';
-      if (/\bshort\b/i.test(block)) { out.type = 'short'; out.quoteLength = 0; out.mode2 = '0'; }
-      else if (/\bmedium\b/i.test(block)) { out.type = 'medium'; out.quoteLength = 1; out.mode2 = '1'; }
-      else if (/\blong\b/i.test(block)) { out.type = 'long'; out.quoteLength = 2; out.mode2 = '2'; }
-      else if (/\bthicc\b|\bthick\b/i.test(block)) { out.type = 'thicc'; out.quoteLength = 3; out.mode2 = '3'; }
+      if (/\bshort\b/i.test(block)) { out.type = 'short'; out.quoteLength = 0; out.mode2 = 'short'; }
+      else if (/\bmedium\b/i.test(block)) { out.type = 'medium'; out.quoteLength = 1; out.mode2 = 'medium'; }
+      else if (/\blong\b/i.test(block)) { out.type = 'long'; out.quoteLength = 2; out.mode2 = 'long'; }
+      else if (/\bthicc\b|\bthick\b/i.test(block)) { out.type = 'thicc'; out.quoteLength = 3; out.mode2 = 'thicc'; }
       else { out.type = 'short'; out.mode2 = '0'; }
     } else if (/\bzen\b/i.test(block)) {
       out.mode = 'zen'; out.type = 'zen'; out.mode2 = 'zen';
@@ -774,12 +774,16 @@
         mode2 = 'zen';
       } else if (/\bquote\b/.test(ttFlat)) {
         mode = 'quote';
-        if (/\bshort\b/.test(ttFlat)) quoteLength = 0;
-        else if (/\bmedium\b/.test(ttFlat)) quoteLength = 1;
-        else if (/\blong\b/.test(ttFlat)) quoteLength = 2;
-        else if (/\bthicc\b|\bthick\b/.test(ttFlat)) quoteLength = 3;
-        else if (/\bfavou?rite\b|\ball\b/.test(ttFlat)) quoteLength = -1;
-        mode2 = String(quoteLength != null ? quoteLength : '-1');
+        let qType = null;
+        if (/\bshort\b/.test(ttFlat)) { quoteLength = 0; qType = 'short'; }
+        else if (/\bmedium\b/.test(ttFlat)) { quoteLength = 1; qType = 'medium'; }
+        else if (/\blong\b/.test(ttFlat)) { quoteLength = 2; qType = 'long'; }
+        else if (/\bthicc\b|\bthick\b/.test(ttFlat)) { quoteLength = 3; qType = 'thicc'; }
+        else if (/\bfavou?rite\b/.test(ttFlat)) { quoteLength = -1; qType = 'favorite'; }
+        else if (/\ball\b/.test(ttFlat)) { quoteLength = -1; qType = 'all'; }
+        // Store readable type in mode2 when known (filters/tooltips); keep quoteLength numeric
+        mode2 = qType != null ? qType : String(quoteLength != null ? quoteLength : '-1');
+        try { if (qType) window.__eaCaptureType = qType; } catch (e) {}
       } else if (/\bwords\b/.test(ttFlat)) {
         mode = 'words';
         const wm = ttFlat.match(/\bwords\b(?:\s*[:x]?\s*|\s+)(\d+)\b/) || ttFlat.match(/\b(10|25|50|100)\b/);
@@ -1022,6 +1026,9 @@
       isPb: !!document.querySelector('#result .group.wpm .badge, #result .pb, #result .crown'),
       testDuration,
       quoteLength,
+      type: (typeof window !== 'undefined' && window.__eaCaptureType) ||
+            (quoteLength === 0 ? 'short' : quoteLength === 1 ? 'medium' :
+             quoteLength === 2 ? 'long' : quoteLength === 3 ? 'thicc' : null),
       _source: 'ea-live-dom'
     };
   }
@@ -1446,30 +1453,24 @@
     if (Array.isArray(r.charStats) && r.charStats.length) {
       chars = Number(r.charStats[0]) || 0;
     }
+    if (!chars && r.characters != null) {
+      const m = String(r.characters).match(/^(\d+)/);
+      if (m) chars = parseInt(m[1], 10);
+    }
     if (!chars && r.totalWords) chars = Number(r.totalWords) * 5;
-    if (!chars && r.wpm && r.testDuration) chars = (Number(r.wpm) / 60) * 5 * Number(r.testDuration);
-    const words = Number(r.totalWords) || (chars ? chars / 5 : 0);
-    // Monkeytype-ish thresholds
-    if (chars > 0) {
-      if (chars <= 100) return 'short';
-      if (chars <= 300) return 'medium';
-      if (chars <= 600) return 'long';
-      return 'thicc';
+    if (!chars && r.wpm && r.testDuration) {
+      const dur = Number(r.testDuration);
+      if (dur > 0 && dur < 3600) chars = (Number(r.wpm) / 60) * 5 * dur;
     }
-    if (words > 0) {
-      if (words <= 20) return 'short';
-      if (words <= 55) return 'medium';
-      if (words <= 110) return 'long';
-      return 'thicc';
-    }
-    return null;
+    // Official MT bands (characters)
+    if (chars <= 0) return null;
+    if (chars < 100) return 'short';
+    if (chars < 300) return 'medium';
+    if (chars <= 600) return 'long';
+    return 'thicc';
   }
 
-  /**
-   * Ensure separate mode + type fields.
-   * mode: time|words|quote|zen|custom
-   * type: 15/30/60/120/custom | 10/25/50/100/custom | all/short/medium/long/thicc/favorite | zen | jail|low_confidence|tag_list|other
-   */
+
   function applyTypeFields(r) {
     if (!r) return r;
     let mode = String(r.mode || 'time').toLowerCase();
@@ -1499,6 +1500,7 @@
       if (!qt && ['0','1','2','3'].includes(mode2)) qt = quoteTypeFromLength(mode2);
       if (!qt && ['short','medium','long','thicc'].includes(mode2)) qt = mode2;
       if (!qt && ['short','medium','long','thicc'].includes(type)) qt = type;
+      if (qt) { type = qt; r.type = qt; }
       // mode2 is a large number → quote id, not length
       if (!qt && mode2 && /^\d+$/.test(mode2) && Number(mode2) > 3) {
         r.quoteId = Number(mode2);
@@ -3212,30 +3214,38 @@
 
   function formatResultType(r) {
     if (!r) return '—';
+    const strTypes = ['short', 'medium', 'long', 'thicc', 'favorite', 'all'];
     if (r.mode === 'quote') {
-      const ql = r.quoteLength;
-      const map = { 1: 'short', 2: 'medium', 3: 'long', 4: 'thicc', 5: 'all',
-        short: 'short', medium: 'medium', long: 'long', thicc: 'thicc', all: 'all', favorite: 'favorite' };
-      if (ql != null && map[ql] != null) return map[ql];
-      if (r.type && map[String(r.type).toLowerCase()]) return map[String(r.type).toLowerCase()];
-      // mode2 as quote id (large number) is not a type — derive from char count
-      const m2 = String(r.mode2 || '');
-      if (m2 && map[m2.toLowerCase()]) return map[m2.toLowerCase()];
-      if (/^\d+$/.test(m2) && Number(m2) > 20) {
-        const c = resultCharCount(r);
-        if (c >= 550) return 'thicc';
-        if (c >= 350) return 'long';
-        if (c >= 150) return 'medium';
-        if (c > 1) return 'short';
+      // 1) Explicit type string from result screen / capture
+      const t = String(r.type || '').toLowerCase().trim();
+      if (strTypes.includes(t)) return t;
+      // 2) mode2 stored as short/medium/long/thicc
+      const m2 = String(r.mode2 || '').toLowerCase().trim();
+      if (strTypes.includes(m2)) return m2;
+      // 3) quoteLength / mode2 numeric: live uses 0–3 (short…thicc)
+      const ql = (r.quoteLength != null && r.quoteLength !== '') ? r.quoteLength : m2;
+      if (ql != null && ql !== '') {
+        if (typeof quoteTypeFromLength === 'function') {
+          const qt = quoteTypeFromLength(ql);
+          if (qt) return qt;
+        }
+        const n = Number(ql);
+        if (n === 0) return 'short';
+        if (n === 1) return 'medium';
+        if (n === 2) return 'long';
+        if (n === 3) return 'thicc';
       }
-      if (m2 && !/^\d+$/.test(m2)) return m2;
+      return '—';
+    }
+    if (r.mode === 'time' || r.mode === 'words') {
+      if (r.mode2 != null && r.mode2 !== '') return String(r.mode2);
     }
     if (r.type && !/^\d+$/.test(String(r.type))) return r.type;
     if (r.mode2 != null && r.mode2 !== '') return String(r.mode2);
     return '—';
   }
 
-  
+
   function weightedMeanFromResults(list, getter) {
     if (!list || !list.length) return null;
     if (!trueAverage) {
@@ -6778,7 +6788,7 @@
       }, 60000); // check every minute
     }
 
-  console.log('[Monkeytype Eternal Archive] v2.2.59 ready — mode/type + migrate');
+  console.log('[Monkeytype Eternal Archive] v2.2.60 ready — mode/type + migrate');
   }
 
   if (document.readyState === 'loading') {
@@ -13896,5 +13906,5 @@
     return info;
   };
 
-console.log('[KeyConf] v2.2.59 ready \u2014', WORD_BANKS.reduce((n,b)=>n+b.length,0), 'words in', WORD_BANKS.length, 'shards');
+console.log('[KeyConf] v2.2.60 ready \u2014', WORD_BANKS.reduce((n,b)=>n+b.length,0), 'words in', WORD_BANKS.length, 'shards');
 })();
