@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Monkeytype Kit Full (Archive + Jail + Hotlist + Dictation + Key Confidence)
 // @namespace    https://monkeytype.com/kit
-// @version      2.2.66
+// @version      2.2.72
 // @description  Bundle: Eternal Archive, Jail, Hotlist, Dictation, Key Confidence + Best WPM. Single Ape Key in Archive panel.
 // @author       kitkat + Grok
 // @match        https://monkeytype.com/*
@@ -172,8 +172,9 @@
       const wpm = Number(result.wpm);
       if (!ts || !wpm) return null;
       const acc = result.acc != null ? Number(result.acc) : null;
-      // Official id match always; otherwise only ~12s window (not 120s)
-      const win = windowMs != null ? windowMs : 12000;
+      const isLive = String(result.id || '').startsWith('live_') || result._source === 'ea-live-dom';
+      // Live↔live: 90s (re-captures of same test). Live↔server: 12s default.
+      const win = windowMs != null ? windowMs : (isLive ? 90000 : 12000);
       let best = null;
       let bestScore = Infinity;
       for (const r of all) {
@@ -1682,9 +1683,10 @@
   }
 
   function cleanWordText(w) {
+    // Keep punctuation attached to the token (we'll / this, / like-so / !).
+    // A "word" is whatever sits between spaces — do not strip trailing , . ! etc.
     let t = String(w || '').replace(/\s+/g, ' ').trim();
-    t = t.replace(/^[^\p{L}\p{N}]+/u, '').replace(/[^\p{L}\p{N}'’-]+$/u, '');
-    if (!t || !/[\p{L}\p{N}]/u.test(t)) return '';
+    if (!t) return '';
     return t;
   }
 
@@ -1703,53 +1705,82 @@
   }
 
   function letterErrorSelector() {
-    // Same as Jail Mode — NOT corrected, NOT speed heatmap
+    // Any hard error OR corrected letter = the word was stumbled
+    // (punctuation mistakes on we'll / this, count too)
     return (
-      'letter.incorrect, letter.extra, letter.missed, ' +
-      '.letter.incorrect, .letter.extra, .letter.missed'
+      'letter.incorrect, letter.extra, letter.missed, letter.corrected, ' +
+      '.letter.incorrect, .letter.extra, .letter.missed, .letter.corrected'
     );
   }
 
   function wordHasMistake(w) {
     if (!w) return false;
+    if (w.classList && w.classList.contains('error')) return true;
     return !!w.querySelector(letterErrorSelector());
   }
 
   function isRealWordEl(w) {
     if (!w || !w.classList || !w.classList.contains('word')) return false;
+    // Ghost / spacer nodes Monkeytype sometimes leaves in #words
+    if (w.classList.contains('before') || w.classList.contains('after')) return false;
     const dw = (w.getAttribute('data-word') || '').trim();
-    if (dw && /[\p{L}\p{N}]/u.test(dw)) return true;
+    // Space-delimited token: data-word is the authoritative token (we'll / haven't / clowns.)
+    if (dw) return true;
     const letters = w.querySelectorAll('letter, .letter');
     if (!letters.length) return false;
     let t = '';
-    letters.forEach((l) => { t += (l.textContent || ''); });
-    return /[\p{L}\p{N}]/u.test(t.trim());
+    letters.forEach((l) => {
+      if (l.classList.contains('extra')) return; // typed extras are not the target token
+      t += (l.textContent || '');
+    });
+    return t.trim().length > 0;
+  }
+
+  /** Word was actually reached/typed in this test (not a future word still in the buffer) */
+  function wasReachedWord(w) {
+    if (!w) return false;
+    if (w.classList.contains('typed') || w.classList.contains('error')) return true;
+    return !!w.querySelector(
+      'letter.correct, letter.incorrect, letter.corrected, letter.extra, letter.missed, ' +
+      '.letter.correct, .letter.incorrect, .letter.corrected, .letter.extra, .letter.missed'
+    );
   }
 
   function getTestWordElements() {
-    const pick = (nodeList) => Array.from(nodeList || []).filter(isRealWordEl);
-    // Prefer full result history when present
-    const hist = pick(document.querySelectorAll('#resultWordsHistory .word'));
+    const pick = (nodeList, reachedOnly) => {
+      const arr = Array.from(nodeList || []).filter(isRealWordEl);
+      if (!reachedOnly) return arr;
+      return arr.filter(wasReachedWord);
+    };
+    // Prefer full result history when present — each .word is one space-delimited token
+    const hist = pick(document.querySelectorAll('#resultWordsHistory .word, .resultWordsHistory .word'), false);
     if (hist.length) return hist;
-    const live = pick(document.querySelectorAll('#words .word'));
+    // Live test: only words the cursor has reached (not the pre-rendered buffer ahead)
+    const live = pick(document.querySelectorAll('#words .word'), true);
     return live;
   }
 
   function captureMistakesImmediate() {
     try {
-      if (isResultScreenVisible()) return;
-      const sel = letterErrorSelector();
+      // Active word while typing
       const active = document.querySelector('#words .word.active');
-      if (active && active.querySelector(sel)) {
+      if (active && isRealWordEl(active) && wordHasMistake(active)) {
         const t = wordTargetText(active);
         if (t) stumbledWordTexts.add(t);
       }
-      // Any word that still shows hard error letters
+      // Live words with error/corrected (only real tokens)
       document.querySelectorAll('#words .word').forEach((w) => {
-        if (w.querySelector(sel)) {
-          const t = wordTargetText(w);
-          if (t) stumbledWordTexts.add(t);
-        }
+        if (!isRealWordEl(w) || !wordHasMistake(w)) return;
+        const t = wordTargetText(w);
+        if (t) stumbledWordTexts.add(t);
+      });
+      // Result history: each .word = one space-delimited token
+      document.querySelectorAll(
+        '#resultWordsHistory .word, #wordsHistory .word, .resultWordsHistory .word'
+      ).forEach((w) => {
+        if (!isRealWordEl(w) || !wordHasMistake(w)) return;
+        const t = wordTargetText(w);
+        if (t) stumbledWordTexts.add(t);
       });
       if (stumbledWordTexts.size) persistStumbleState();
     } catch (e) {}
@@ -1774,6 +1805,31 @@
 
   // Observe letter class changes while typing (more reliable than keys alone)
   let wordsMistakeObserver = null;
+  
+  // Fallback: key activity can mark a stumble even if MutationObserver misses a brief incorrect class
+  if (!window.__eaStumbleKeyProbe) {
+    window.__eaStumbleKeyProbe = true;
+    document.addEventListener('keydown', function eaStumbleKeyProbe(e) {
+      try {
+        if (e.key === 'Escape' || e.key === 'Tab') return;
+        const active = document.querySelector('#words .word.active');
+        if (!active) return;
+        // Backspace while word has any error/corrected letter, or any key while incorrect visible
+        const hasHard = !!active.querySelector(
+          'letter.incorrect, letter.extra, letter.missed, .letter.incorrect, .letter.extra, .letter.missed'
+        );
+        const hasCorr = !!active.querySelector('letter.corrected, .letter.corrected');
+        if (hasHard || (e.key === 'Backspace' && (hasHard || hasCorr)) || hasCorr) {
+          const t = wordTargetText(active);
+          if (t) {
+            stumbledWordTexts.add(t);
+            persistStumbleState();
+          }
+        }
+      } catch (err) {}
+    }, true);
+  }
+
   function bindWordsMistakeObserver() {
     const root = document.getElementById('words');
     if (!root) return;
@@ -1781,7 +1837,7 @@
       try { wordsMistakeObserver.disconnect(); } catch (e) {}
     }
     wordsMistakeObserver = new MutationObserver(() => {
-      if (!isResultScreenVisible()) captureMistakesImmediate();
+      captureMistakesImmediate();
     });
     try {
       wordsMistakeObserver.observe(root, {
@@ -1797,25 +1853,38 @@
 
   function finalizeSnapshotFromState() {
     const words = getTestWordElements();
-    const total = words.length;
-    // Count unique jailed-style targets that appear in this test's words
-    const present = new Set(words.map(wordTargetText).filter(Boolean));
-    let stumbled = 0;
-    for (const t of stumbledWordTexts) {
-      if (present.has(t)) stumbled++;
-    }
-    // Also count hard-error words still on DOM even if text set missed them
-    const sel = letterErrorSelector();
-    words.forEach((w) => {
-      if (w.querySelector(sel)) {
+    // total = number of space-delimited word slots in this test (NOT unique texts)
+    let total = words.length;
+
+    // Mark mistakes by INDEX on this same list (repeated words each count separately)
+    const stumbledIdx = new Set();
+    words.forEach((w, idx) => {
+      if (wordHasMistake(w)) {
+        stumbledIdx.add(idx);
         const t = wordTargetText(w);
-        if (t && !stumbledWordTexts.has(t)) {
-          stumbledWordTexts.add(t);
-          stumbled++;
-        }
+        if (t) stumbledWordTexts.add(t);
       }
     });
+
+    // Also keep any texts we saw live; map them onto first unmatched occurrence of that token
+    const used = new Set(stumbledIdx);
+    for (const t of stumbledWordTexts) {
+      const lower = String(t).toLowerCase();
+      for (let idx = 0; idx < words.length; idx++) {
+        if (used.has(idx)) continue;
+        const wt = wordTargetText(words[idx]);
+        if (!wt) continue;
+        if (wt === t || wt.toLowerCase() === lower) {
+          stumbledIdx.add(idx);
+          used.add(idx);
+          break; // one occurrence per recorded stumble text pass; loop continues for next text
+        }
+      }
+    }
+
+    let stumbled = stumbledIdx.size;
     if (total > 0) stumbled = Math.min(stumbled, total);
+
     if (total > 0 || stumbled > 0) {
       const tot = total > 0 ? total : Math.max(stumbled, 1);
       lastStumbleSnapshot = {
@@ -1830,6 +1899,7 @@
       } catch (e) {}
     }
   }
+
 
   function scheduleScan() {
     if (scanScheduled) return;
@@ -2715,16 +2785,24 @@
           const match = snap.results.find(sr => Math.abs(Number(sr.wpm) - Number(r.wpm)) <= 0.51);
           if (match?.tags?.length) match.tags.forEach(t => tagSet.add(String(t)));
         }
-        // DOM active tag buttons
+        // DOM active tag buttons (config + result page)
         document.querySelectorAll(
           '#testConfig .tags .textButton.active, .pageTest .tags .textButton.active, ' +
-          '.tagsBtn .active, .tags .textButton.active, .tagsButton.active'
+          '.tagsBtn .active, .tags .textButton.active, .tagsButton.active, ' +
+          '#result .tags .textButton, #result .tags .active, .pageResult .tags .textButton, ' +
+          '#result .group.tags .bottom, #result .tags'
         ).forEach(el => {
           const id = el.getAttribute('data-tag-id') || el.dataset?.tagId || el.getAttribute('tagid');
-          const name = (el.getAttribute('aria-label') || el.textContent || '').trim();
+          let name = (el.getAttribute('aria-label') || el.textContent || '').trim();
+          // Result page often shows plain tag names like "eclipse"
+          name = name.replace(/^tags\s*/i, '').trim();
           if (id) tagSet.add(String(id));
           else if (name && name.toLowerCase() !== 'tags') {
-            tagSet.add(rev[name.toLowerCase()] || name);
+            // May be multiple names in one node
+            name.split(/[,\s]+/).filter(Boolean).forEach(n => {
+              if (n.toLowerCase() === 'tags') return;
+              tagSet.add(rev[n.toLowerCase()] || n);
+            });
           }
         });
 
@@ -2746,7 +2824,8 @@
       // Toast only once per finished test (wpm+acc within 20s) — updates stay silent
       const capKey = Math.round(Number(r.wpm) * 100) + '_' + Math.round(Number(r.acc) * 100);
       const now = Date.now();
-      const isRepeat = (capKey === _eaLastCaptureKey && (now - _eaLastCaptureAt) < 45000);
+      // Same wpm+acc within 8s = same test (re-capture). Wider window caused skipped appends for back-to-back similar tests.
+      const isRepeat = (capKey === _eaLastCaptureKey && (now - _eaLastCaptureAt) < 8000);
       if (!isRepeat) {
         _eaLastCaptureKey = capKey;
         _eaLastCaptureAt = now;
@@ -3890,12 +3969,8 @@
     // Always pin accuracy axis to 90–100 for readability (user request)
     let accAxisMin = 90; // visual floor; dots below 90 clamped in datasets, tooltips use real acc
     const stumbleVals = stumbleData.filter(v => v != null && !Number.isNaN(v));
-    let stumbleMax = 25;
-    if (stumbleVals.length) {
-      const mx = Math.max(...stumbleVals);
-      // Tight scale: pad ~10% then round up to nice step of 5
-      stumbleMax = Math.min(100, Math.max(10, Math.ceil((mx * 1.08) / 5) * 5));
-    }
+        // Visual lock 0–30 for stumble on per-test graph (real values kept for calc/tooltips)
+    let stumbleMax = 30;
 
     const ctx = canvas.getContext('2d');
     chartInstance = new (getChart())(ctx, {
@@ -3972,7 +4047,7 @@
             label: 'Stumble %',
             data: drawIndexes
               .filter(i => stumbleData[i] != null)
-              .map(i => ({ x: i, y: stumbleData[i] })),
+              .map(i => ({ x: i, y: Math.min(30, stumbleData[i]) })),
             backgroundColor: 'rgba(110, 198, 255, 0.85)',
             borderColor: 'rgba(110, 198, 255, 1)',
             pointRadius: dotRadius,
@@ -3984,7 +4059,7 @@
             label: 'Avg of 10 (Stumble %)',
             data: results.map((_, i) => ({
               x: i,
-              y: avg10Stumble[i] == null ? NaN : avg10Stumble[i]
+              y: avg10Stumble[i] == null ? NaN : Math.min(30, avg10Stumble[i])
             })),
             type: 'line',
             borderColor: 'rgba(110, 198, 255, 0.95)',
@@ -4000,7 +4075,7 @@
             label: 'Avg of 100 (Stumble %)',
             data: results.map((_, i) => ({
               x: i,
-              y: avg100Stumble[i] == null ? NaN : avg100Stumble[i]
+              y: avg100Stumble[i] == null ? NaN : Math.min(30, avg100Stumble[i])
             })),
             type: 'line',
             borderColor: 'rgba(80, 170, 230, 0.95)',
@@ -4088,11 +4163,24 @@
                 const src = (window.__eaLastFiltered && window.__eaLastFiltered.length)
                   ? window.__eaLastFiltered : results;
                 const x = items[0].parsed?.x;
-                const realIndex = (typeof x === 'number' && src[Math.round(x)])
+                const y = items[0].parsed?.y;
+                let realIndex = (typeof x === 'number' && src[Math.round(x)])
                   ? Math.round(x)
                   : (src.length > MAX_POINTS_DRAW && drawIndexes[items[0].dataIndex] != null
                       ? drawIndexes[items[0].dataIndex] : items[0].dataIndex);
-                const r = src[realIndex];
+                let r = src[realIndex];
+                // Fallback: match by nearest wpm when index is off after live appends
+                if (!r || (y != null && r.wpm != null && Math.abs(Number(r.wpm) - Number(y)) > 3
+                           && items[0].dataset && /wpm/i.test(items[0].dataset.label || ''))) {
+                  let best = -1, bestD = Infinity;
+                  for (let i = 0; i < src.length; i++) {
+                    const dw = Math.abs(Number(src[i].wpm) - Number(y));
+                    const dx = (typeof x === 'number') ? Math.abs(i - x) : 0;
+                    const d = dw * 10 + dx;
+                    if (d < bestD) { bestD = d; best = i; }
+                  }
+                  if (best >= 0) { realIndex = best; r = src[best]; }
+                }
                 if (!r) return [];
                 const nameMap = (typeof window !== 'undefined' && window.__eaTagNameMap) || {};
                 const tagNames = (r.tags || []).map(id => nameMap[String(id)] || id);
@@ -4557,13 +4645,48 @@
 
       // CRITICAL: tooltip reads results[realIndex].timestamp from __eaLastFiltered.
       // Must push r here or the new point shows 1/1/1970.
-      if (!window.__eaLastFiltered) window.__eaLastFiltered = [];
-      if (!window.__eaLastFiltered.some(x =>
-          x.id === r.id ||
-          (Math.abs(Number(x.wpm) - Number(r.wpm)) < 0.05 &&
-           Math.abs((Number(x.timestamp) || 0) - (Number(r.timestamp) || 0)) < 15000))) {
-        window.__eaLastFiltered.push(r);
+      // Ensure tooltip fields always present on the live object
+      r.mode = r.mode || 'quote';
+      r.type = r.type || r.mode2 || '';
+      r.language = r.language || 'english';
+      r.tags = Array.isArray(r.tags) ? r.tags : [];
+      r.funbox = r.funbox || 'none';
+      if (r.acc == null && r.accuracy != null) r.acc = r.accuracy;
+      if (r.stumblePct == null && r.stumbledWords != null && r.totalWords > 0) {
+        r.stumblePct = (Number(r.stumbledWords) / Number(r.totalWords)) * 100;
       }
+
+      if (!window.__eaLastFiltered) window.__eaLastFiltered = [];
+      // Find near-duplicate already on the graph (same test re-saved)
+      let liveIdx = window.__eaLastFiltered.findIndex(x =>
+          x.id === r.id ||
+          (Math.abs(Number(x.wpm) - Number(r.wpm)) < 0.08 &&
+           Math.abs(Number(x.acc != null ? x.acc : -1) - Number(r.acc != null ? r.acc : -2)) < 0.6 &&
+           Math.abs((Number(x.timestamp) || 0) - (Number(r.timestamp) || 0)) < 90000));
+      if (liveIdx >= 0) {
+        // Update meta in place — do NOT add another scatter point
+        const prev = window.__eaLastFiltered[liveIdx];
+        window.__eaLastFiltered[liveIdx] = Object.assign({}, prev, r, {
+          id: prev.id || r.id,
+          _id: prev._id || r._id,
+          timestamp: prev.timestamp || r.timestamp,
+          // Prefer non-zero stumble if either has it
+          stumbledWords: (r.stumbledWords > (prev.stumbledWords || 0)) ? r.stumbledWords : (prev.stumbledWords ?? r.stumbledWords),
+          cleanWords: r.cleanWords ?? prev.cleanWords,
+          totalWords: r.totalWords || prev.totalWords,
+          stumblePct: (r.stumbledWords > (prev.stumbledWords || 0)) ? r.stumblePct : (prev.stumblePct ?? r.stumblePct),
+          type: r.type || prev.type,
+          mode: r.mode || prev.mode,
+          tags: (r.tags && r.tags.length) ? r.tags : prev.tags,
+          language: r.language || prev.language
+        });
+        if (chartInstance && chartInstance.data && chartInstance.data.datasets) {
+          try { chartInstance.update('none'); } catch (e) {}
+        }
+        console.log('[EA] live append — updated existing point', liveIdx, r.wpm);
+        return true;
+      }
+      window.__eaLastFiltered.push(r);
 
       if (!chartInstance || !chartInstance.data || !chartInstance.data.datasets) {
         window.__eaDirtyCharts = true;
@@ -4583,9 +4706,16 @@
       } else if (window.__eaLastFiltered) {
         x = Math.max(0, window.__eaLastFiltered.length - 1);
       }
+      // Guard: never push a second point with same x
+      if (wpmDs && wpmDs.data.some(p => p && Math.abs(p.x - x) < 0.01 && Math.abs(p.y - r.wpm) < 0.08)) {
+        console.log('[EA] live append — skip duplicate scatter', x, r.wpm);
+        return true;
+      }
       if (wpmDs) wpmDs.data.push({ x, y: r.wpm });
       if (accDs) accDs.data.push({ x, y: r.acc == null ? null : Math.max(90, r.acc) });
-      if (stDs && r.stumblePct != null) stDs.data.push({ x, y: r.stumblePct });
+      if (stDs && r.stumblePct != null) {
+        stDs.data.push({ x, y: Math.min(30, Math.max(0, r.stumblePct)) });
+      }
 
       // Rolling averages INCLUDE the new point (already in __eaLastFiltered)
       try {
@@ -6097,32 +6227,122 @@
 
   // Unique integer ticks only — prevents Chart.js from repeating the same label
   function uniqueIndexTicks(labels) {
+    const n = labels.length;
+    function preferredIndexes() {
+      if (n <= 0) return [];
+      if (n === 1) return [0];
+      const maxTicks = n <= 16 ? n : 12;
+      const idxs = [0];
+      if (maxTicks <= 2) {
+        if (n > 1) idxs.push(n - 1);
+        return idxs;
+      }
+      const step = (n - 1) / (maxTicks - 1);
+      for (let k = 1; k < maxTicks - 1; k++) {
+        const idx = Math.round(k * step);
+        if (idx > 0 && idx < n - 1 && idxs[idxs.length - 1] !== idx) idxs.push(idx);
+      }
+      if (idxs[idxs.length - 1] !== n - 1) idxs.push(n - 1);
+      return idxs;
+    }
     return {
       color: '#888',
-      autoSkip: true,
+      autoSkip: false,
       maxRotation: 45,
-      // Always show first day/month label (Chart.js often skips edge ticks)
+      minRotation: 0,
       afterBuildTicks: function (axis) {
         try {
-          const n = labels.length;
           if (!n) return;
-          const have = new Set((axis.ticks || []).map(t => Math.round(t.value)));
-          const add = [];
-          if (!have.has(0)) add.push({ value: 0 });
-          if (n > 1 && !have.has(n - 1)) add.push({ value: n - 1 });
-          if (add.length) {
-            axis.ticks = (axis.ticks || []).concat(add).sort((a, b) => a.value - b.value);
+          const minV = axis.min != null ? Number(axis.min) : 0;
+          const maxV = axis.max != null ? Number(axis.max) : (n - 1);
+          const force = new Set();
+          // Preferred global ticks that fall in view
+          for (const idx of preferredIndexes()) {
+            if (idx >= minV - 0.51 && idx <= maxV + 0.51) force.add(idx);
           }
+          // Always force data first/last if within ~2 units of view (so zoom still shows ends)
+          if (0 >= minV - 2 && 0 <= maxV + 2) force.add(0);
+          if (n > 1 && (n - 1) >= minV - 2 && (n - 1) <= maxV + 2) force.add(n - 1);
+          // Visible edge indexes when zoomed
+          const lo = Math.max(0, Math.ceil(minV - 1e-9));
+          const hi = Math.min(n - 1, Math.floor(maxV + 1e-9));
+          if (lo <= hi) { force.add(lo); force.add(hi); }
+          axis.ticks = Array.from(force).sort((a, b) => a - b).map(v => ({ value: v }));
         } catch (e) {}
       },
       callback: function (val) {
-        const i = Math.round(val);
-        if (Math.abs(i - val) > 1e-6) return '';
-        if (i < 0 || i >= labels.length) return '';
-        return labels[i];
+        const idx = Math.round(val);
+        if (Math.abs(idx - val) > 1e-6) return '';
+        if (idx < 0 || idx >= labels.length) return '';
+        return labels[idx];
       }
     };
   }
+
+  /** Paint first/last (or zoom-edge) date labels if Chart.js omitted them */
+  function edgeDateLabelsPlugin(labels) {
+    return {
+      id: 'eaEdgeDateLabels',
+      afterDraw(chart) {
+        try {
+          const n = labels.length;
+          if (!n) return;
+          const xScale = chart.scales.x;
+          const area = chart.chartArea;
+          if (!xScale || !area) return;
+          const ctx = chart.ctx;
+          const minV = Number(xScale.min);
+          const maxV = Number(xScale.max);
+
+          const targets = [];
+          const add = (idx) => {
+            if (idx == null || idx < 0 || idx >= n) return;
+            if (!targets.includes(idx)) targets.push(idx);
+          };
+          // Data ends when in or near the view
+          if (0 >= minV - 2 && 0 <= maxV + 2) add(0);
+          if (n > 1 && (n - 1) >= minV - 2 && (n - 1) <= maxV + 2) add(n - 1);
+          // Visible zoom edges
+          const lo = Math.max(0, Math.ceil(minV - 1e-9));
+          const hi = Math.min(n - 1, Math.floor(maxV + 1e-9));
+          if (lo <= hi) { add(lo); add(hi); }
+
+          ctx.save();
+          ctx.font = 'bold 11px ui-sans-serif, system-ui, sans-serif';
+          ctx.textBaseline = 'middle';
+          // Sit in the bottom padding band (must stay inside canvas)
+          const y = Math.min(chart.height - 9, area.bottom + 13);
+          for (const idx of targets) {
+            const text = labels[idx];
+            if (!text) continue;
+            let px = xScale.getPixelForValue(idx);
+            const tw = ctx.measureText(text).width;
+            const padX = 5;
+            const bw = tw + padX * 2;
+            const bh = 15;
+            px = Math.max(area.left + bw / 2 + 1, Math.min(area.right - bw / 2 - 1, px));
+            const bx = px - bw / 2;
+            const by = y - bh / 2;
+            ctx.fillStyle = 'rgba(30,30,34,0.95)';
+            const rr = 3;
+            ctx.beginPath();
+            ctx.moveTo(bx + rr, by);
+            ctx.arcTo(bx + bw, by, bx + bw, by + bh, rr);
+            ctx.arcTo(bx + bw, by + bh, bx, by + bh, rr);
+            ctx.arcTo(bx, by + bh, bx, by, rr);
+            ctx.arcTo(bx, by, bx + bw, by, rr);
+            ctx.closePath();
+            ctx.fill();
+            ctx.fillStyle = '#d1d0c5';
+            ctx.textAlign = 'center';
+            ctx.fillText(text, px, y + 0.5);
+          }
+          ctx.restore();
+        } catch (e) {}
+      }
+    };
+  }
+
 
   function makeAggregateChart(canvasId, containerId, points, {
     wpmLabel, accLabel, xTitle, mode // 'day' | 'month'
@@ -6133,39 +6353,49 @@
 
     if (!points.length) {
       const ctx = canvas.getContext('2d');
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.clearRect(0, 0, canvas.width || 300, canvas.height || 150);
       return null;
     }
 
-    // Fit inside frame like main graph — zoom/drag instead of horizontal scroll
-    const nPts = points.length;
-    const parentW = (container.parentElement?.clientWidth || container.closest('.ea-hscroll')?.clientWidth || 600) - 8;
+    // Fit inside frame — zoom/drag, no horizontal scrollbar
+    const parentW = (container.parentElement?.clientWidth
+      || container.closest('.ea-hscroll')?.clientWidth || 600) - 8;
     const width = Math.max(200, parentW);
     container.style.width = width + 'px';
     container.style.minWidth = '0';
     container.style.maxWidth = '100%';
 
     const labels = points.map(p => p.shortLabel || p.label);
+    const n = points.length;
 
     return new (getChart())(canvas.getContext('2d'), {
       type: 'scatter',
+      plugins: [
+        edgeDateLabelsPlugin(labels),
+        (typeof createCrosshairPlugin === 'function'
+          ? createCrosshairPlugin({ leftDecimals: 1, rightDecimals: 2, rightUnit: '%' })
+          : null),
+        (typeof createWheelZoomPlugin === 'function' ? createWheelZoomPlugin() : null)
+      ].filter(Boolean),
       data: {
         datasets: [
           {
             label: wpmLabel,
             data: points.map((d, i) => ({ x: i, y: d.avgWpm })),
             backgroundColor: 'rgba(233, 196, 106, 0.85)',
-            pointRadius: aggDotRadius,
-            pointHoverRadius: dotHoverRadius,
+            pointRadius: (typeof aggDotRadius === 'number' ? aggDotRadius : 3),
+            pointHoverRadius: (typeof dotHoverRadius === 'number' ? dotHoverRadius : 5),
             yAxisID: 'y'
           },
           {
             label: accLabel,
-            data: points.map((d, i) => ({ x: i, y: d.avgAcc == null ? null : Math.max(90, d.avgAcc) })),
-            
+            data: points.map((d, i) => ({
+              x: i,
+              y: d.avgAcc == null ? null : Math.max(90, d.avgAcc)
+            })),
             backgroundColor: 'rgba(231, 111, 81, 0.85)',
-            pointRadius: aggDotRadius,
-            pointHoverRadius: dotHoverRadius,
+            pointRadius: (typeof aggDotRadius === 'number' ? aggDotRadius : 3),
+            pointHoverRadius: (typeof dotHoverRadius === 'number' ? dotHoverRadius : 5),
             yAxisID: 'y1'
           },
           {
@@ -6182,7 +6412,10 @@
           },
           {
             label: 'Acc trend',
-            data: points.map((d, i) => ({ x: i, y: d.avgAcc })),
+            data: points.map((d, i) => ({
+              x: i,
+              y: d.avgAcc == null ? null : Math.max(90, d.avgAcc)
+            })),
             type: 'line',
             borderColor: 'rgba(231, 111, 81, 0.35)',
             borderWidth: 1.5,
@@ -6195,18 +6428,18 @@
           {
             label: 'Stumble %',
             data: points.map((d, i) => (
-              d.avgStumble == null ? null : { x: i, y: d.avgStumble }
+              d.avgStumble == null ? null : { x: i, y: Math.min(30, d.avgStumble) }
             )).filter(Boolean),
             backgroundColor: 'rgba(110, 198, 255, 0.85)',
             borderColor: 'rgba(110, 198, 255, 0.95)',
-            pointRadius: aggDotRadius,
-            pointHoverRadius: dotHoverRadius,
+            pointRadius: (typeof aggDotRadius === 'number' ? aggDotRadius : 3),
+            pointHoverRadius: (typeof dotHoverRadius === 'number' ? dotHoverRadius : 5),
             yAxisID: 'y2'
           },
           {
             label: 'Stumble trend',
             data: points.map((d, i) => (
-              d.avgStumble == null ? null : { x: i, y: d.avgStumble }
+              d.avgStumble == null ? null : { x: i, y: Math.min(30, d.avgStumble) }
             )).filter(Boolean),
             type: 'line',
             borderColor: 'rgba(110, 198, 255, 0.45)',
@@ -6223,11 +6456,12 @@
         responsive: true,
         maintainAspectRatio: false,
         animation: false,
-        interaction: persistentTooltips
+        layout: { padding: { bottom: 22, left: 2, right: 2 } },
+        interaction: (typeof persistentTooltips !== 'undefined' && persistentTooltips)
           ? { mode: 'index', intersect: false }
           : { mode: 'nearest', intersect: true },
         plugins: {
-                    legend: {
+          legend: {
             labels: {
               color: '#d1d0c5', boxWidth: 12, font: { size: 11 },
               filter: (item) => !item.text.includes('trend')
@@ -6238,13 +6472,12 @@
             callbacks: {
               title: (items) => {
                 const it = items[0];
-                // Prefer x value (day index) — dataIndex breaks if any dataset was sparse
                 let idx = (it.parsed && isFinite(it.parsed.x)) ? Math.round(it.parsed.x)
                   : (it.raw && isFinite(it.raw.x)) ? Math.round(it.raw.x)
                   : it.dataIndex;
                 const d = points[idx];
                 if (!d) return '';
-                return `${d.label}  (${d.count} tests)`;
+                return d.label + '  (' + d.count + ' tests)';
               },
               label: () => null,
               afterBody: (items) => {
@@ -6255,17 +6488,14 @@
                 const d = points[idx];
                 if (!d) return [];
                 const lines = [
-                  `WPM: ${Number(d.avgWpm).toFixed(2)}`,
-                  `Accuracy: ${Number(d.avgAcc).toFixed(2)}%`,
-                  d.avgStumble != null
-                    ? `Stumble: ${Number(d.avgStumble).toFixed(2)}% (${d.stumbleCount || 0}/${d.count} tests with data)`
-                    : 'Stumble: (not recorded)'
+                  'WPM: ' + (d.avgWpm != null ? d.avgWpm.toFixed(2) : '—'),
+                  'Accuracy: ' + (d.avgAcc != null ? d.avgAcc.toFixed(2) + '%' : '—')
                 ];
-                if (mode === 'day') {
-                  lines.push(`Days since first day on graph: ${d.daysSinceStart}`);
+                if (d.avgStumble != null) {
+                  lines.push('Stumble: ' + d.avgStumble.toFixed(2) + '%');
                 }
-                if (mode === 'month') {
-                  lines.push(`Months since first month on graph: ${d.monthsSinceStart}`);
+                if (d.daysSinceStart != null) {
+                  lines.push('Day #' + (d.daysSinceStart + 1) + ' since start');
                 }
                 return lines;
               }
@@ -6275,8 +6505,9 @@
         scales: {
           x: {
             type: 'linear',
-            min: 0,
-            max: Math.max(points.length - 1 + Math.max(2, Math.ceil(points.length * 0.04)), 2),
+            // Small left pad so first date label sits under the first point (not left of the axis)
+            min: -0.35,
+            max: Math.max(n - 1 + Math.max(0.6, Math.ceil(n * 0.015)), 1),
             title: { display: true, text: xTitle, color: '#888' },
             ticks: uniqueIndexTicks(labels),
             grid: { color: 'rgba(255,255,255,0.05)' }
@@ -6301,35 +6532,15 @@
             type: 'linear',
             position: 'right',
             min: 0,
-            max: (function() {
-              const vals = points.map(p => p.avgStumble).filter(v => v != null);
-              if (!vals.length) return 25;
-              const mx = Math.max(...vals);
-              return Math.min(100, Math.max(10, Math.ceil((mx * 1.08) / 5) * 5));
-            })(),
+            max: 30,
             reverse: true,
             title: { display: true, text: 'Stumble % ↓ better', color: '#6ec6ff' },
             ticks: { color: '#6ec6ff' },
             grid: { drawOnChartArea: false }
           }
         }
-      },
-      plugins: [createCrosshairPlugin({ leftDecimals: 2, rightDecimals: 2, rightUnit: '%' }), createWheelZoomPlugin()]
+      }
     });
-    // Default: show the latest days/months (scroll fully right)
-    requestAnimationFrame(() => {
-      try {
-        const sc = container.closest('.ea-hscroll');
-        if (sc) sc.scrollLeft = sc.scrollWidth;
-      } catch (e) {}
-    });
-    setTimeout(() => {
-      try {
-        const sc = container.closest('.ea-hscroll');
-        if (sc) sc.scrollLeft = sc.scrollWidth;
-      } catch (e) {}
-    }, 50);
-    return chart;
   }
 
   function pinScaleLabels(chart, frameSelector) {
@@ -7888,8 +8099,8 @@
       const letters = w.querySelectorAll('letter, .letter');
       if (!letters.length) return;
 
-      const t = cleanWord(w.getAttribute('data-word') || wordTargetText(w) || w.textContent || '');
-      if (!t || !/[\p{L}\p{N}]/u.test(t)) return;
+      const t = (typeof cleanWordText === 'function' ? cleanWordText : cleanWord)(w.getAttribute('data-word') || wordTargetText(w) || w.textContent || '');
+      if (!t) return;
 
       const hasStumble =
         w.classList.contains('error') ||
@@ -10212,10 +10423,15 @@
   let uiRoot = null;
 
   function loadChars() {
+    // Confidence list = normal US keyboard only (drop em-dash, fancy quotes, etc.)
     try {
-      const o = JSON.parse(GM_getValue(STORAGE_CHARS, '{}') || '{}');
+      const raw = JSON.parse(GM_getValue(STORAGE_CHARS, '{}') || '{}') || {};
+      const o = {};
       for (const ch of BASE_CHARS) {
-        if (!o[ch]) o[ch] = { pressed: 0, incorrect: 0 };
+        const s = raw[ch];
+        o[ch] = s && typeof s === 'object'
+          ? { pressed: Number(s.pressed) || 0, incorrect: Number(s.incorrect) || 0 }
+          : { pressed: 0, incorrect: 0 };
       }
       return o;
     } catch (e) {
@@ -10383,6 +10599,10 @@
   }
 
   function ensureChar(ch) {
+    if (!ch || BASE_CHARS.indexOf(ch) === -1) {
+      // Non-US / unknown glyph — ignore for confidence
+      return { pressed: 0, incorrect: 0 };
+    }
     if (!charStats[ch]) charStats[ch] = { pressed: 0, incorrect: 0 };
     return charStats[ch];
   }
@@ -11349,6 +11569,11 @@
 
   function finalizeTest(resultKey) {
     if (!settings.enabled) return;
+    try {
+      if (document.querySelector('#words.zen, .pageTest.zen, body.zen')) return;
+      const modeEl = document.querySelector('#result .group.mode .bottom, #result .mode .bottom');
+      if (modeEl && /zen/i.test(modeEl.textContent || '')) return;
+    } catch (e) {}
     if (!session) {
       console.warn('[KeyConf] finalize: no session');
       return;
@@ -11413,21 +11638,50 @@
     const liveErrorKeys = [];
     if (!session._statsApplied) {
       session._statsApplied = true;
-      // Pressed: once per character occurrence in the finished quote (not key-log replay)
-      for (const ch of expectedFlat) {
-        ensureChar(ch).pressed++;
-      }
-      // Errors: only keys marked wrong live (DOM expected at keydown), deduped by slot
-      const seenSlot = new Set();
-      for (const k of session.keys) {
-        if (k.type !== 'char' || !k.wrong) continue;
-        if (k.expected == null || k.expected === '') continue;
-        // Prefer absolute-ish slot id from live DOM indices + expected char
-        const slotId = String(k.expected) + '|' + String(k.wordIdx) + '|' + String(k.letterIdx);
-        if (seenSlot.has(slotId)) continue;
-        seenSlot.add(slotId);
-        ensureChar(k.expected).incorrect++;
-        liveErrorKeys.push({ typed: k.key, expected: k.expected, wordIdx: k.wordIdx, letterIdx: k.letterIdx });
+      // Only normal US-keyboard characters enter the confidence list
+      const isUs = (ch) => typeof ch === 'string' && ch.length && BASE_CHARS.indexOf(ch) !== -1;
+      // Per expected word: only count chars up to (and including) the first mistake.
+      // Correct prefix → pressed++; first wrong expected char → incorrect++; rest of word ignored.
+      const typedStream = reconstructTypedChars(session.keys);
+      let ti = 0;
+      for (let wi = 0; wi < expectedWords.length; wi++) {
+        const expWord = expectedWords[wi];
+        const typedWord = [];
+        while (ti < typedStream.length && typedStream[ti].key !== ' ') {
+          typedWord.push(typedStream[ti]);
+          ti++;
+        }
+        if (ti < typedStream.length && typedStream[ti].key === ' ') ti++; // consume space
+
+        let firstErr = -1;
+        const len = Math.max(expWord.length, typedWord.length);
+        for (let i = 0; i < len; i++) {
+          const e = expWord[i];
+          const t = typedWord[i];
+          if (!t || e === undefined || t.key !== e) { firstErr = i; break; }
+        }
+        const upto = firstErr < 0 ? expWord.length : firstErr; // correct prefix length
+        for (let i = 0; i < upto; i++) {
+          const ch = expWord[i];
+          if (isUs(ch)) ensureChar(ch).pressed++;
+        }
+        if (firstErr >= 0 && firstErr < expWord.length) {
+          const ch = expWord[firstErr];
+          if (isUs(ch)) {
+            ensureChar(ch).pressed++; // attempted
+            ensureChar(ch).incorrect++;
+            liveErrorKeys.push({
+              typed: (typedWord[firstErr] && typedWord[firstErr].key) || '',
+              expected: ch,
+              wordIdx: wi,
+              letterIdx: firstErr
+            });
+          }
+        } else {
+          // fully correct word — already counted all chars above
+        }
+        // space between words: count as pressed if US
+        if (wi < expectedWords.length - 1 && isUs(' ')) ensureChar(' ').pressed++;
       }
       saveChars();
     }
@@ -12439,6 +12693,12 @@
 
   function checkResult() {
     if (!settings.enabled) return;
+    // Zen has no real quote/words target — never train confidence from free typing
+    try {
+      if (document.querySelector('#words.zen, .pageTest.zen, body.zen, #testConfig .mode .active[mode="zen"]')) return;
+      const modeEl = document.querySelector('#result .group.mode .bottom, #result .mode .bottom');
+      if (modeEl && /zen/i.test(modeEl.textContent || '')) return;
+    } catch (e) {}
     const hasHist = !!(document.getElementById('resultWordsHistory') ||
       document.querySelector('#resultWordsHistory, .resultWordsHistory'));
     const result = document.getElementById('result') || document.querySelector('.pageResult #result, #result');
