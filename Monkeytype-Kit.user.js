@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Monkeytype Kit Full (Archive + Jail + Hotlist + Dictation + Key Confidence)
 // @namespace    https://monkeytype.com/kit
-// @version      2.2.72
+// @version      2.2.77
 // @description  Bundle: Eternal Archive, Jail, Hotlist, Dictation, Key Confidence + Best WPM. Single Ape Key in Archive panel.
 // @author       kitkat + Grok
 // @match        https://monkeytype.com/*
@@ -3121,15 +3121,50 @@
     }
   }
 
+  /** True when it's safe to run heavy sync (won't lag active typing). */
+  function isSafeToBackgroundSync(lastActivityTs) {
+    // Tab in background
+    if (typeof document.hidden === 'boolean' && document.hidden) return true;
+    // Window / tab not focused
+    try {
+      if (typeof document.hasFocus === 'function' && !document.hasFocus()) return true;
+    } catch (e) {}
+    // No mouse/keyboard for 2 minutes
+    const idleMs = Date.now() - (lastActivityTs || 0);
+    if (idleMs >= 2 * 60 * 1000) return true;
+    return false;
+  }
+
   function scheduleBackgroundSync() {
     const TICK_MS = 30 * 60 * 1000; // check every 30 min
     const MIN_GAP = 6 * 60 * 60 * 1000; // sync at most every 6h
+    let lastActivity = Date.now();
+    const bump = () => { lastActivity = Date.now(); };
+    ['keydown', 'mousemove', 'mousedown', 'pointerdown', 'touchstart', 'scroll', 'wheel'].forEach((ev) => {
+      try { document.addEventListener(ev, bump, { passive: true, capture: true }); } catch (e) {}
+    });
+    try {
+      window.addEventListener('focus', bump, { passive: true });
+      window.addEventListener('blur', () => {}, { passive: true });
+    } catch (e) {}
+
     const run = async () => {
       try {
         const last = await getMeta('lastSync', 0);
-        if (!last || Date.now() - Number(last) > MIN_GAP) {
-          await syncResults({ silent: true });
+        if (last && Date.now() - Number(last) <= MIN_GAP) {
+          setTimeout(run, TICK_MS);
+          return;
         }
+        if (!isSafeToBackgroundSync(lastActivity)) {
+          setTimeout(run, TICK_MS);
+          return;
+        }
+        if (typeof isTestActive === 'function' && isTestActive()) {
+          setTimeout(run, TICK_MS);
+          return;
+        }
+        console.log('[EA] background sync (idle/hidden)');
+        await syncResults({ silent: true });
       } catch (e) {}
       setTimeout(run, TICK_MS);
     };
@@ -7157,29 +7192,26 @@
     try { if (typeof unsafeWindow !== 'undefined') unsafeWindow.__eaReconcileStumbles = _rec; } catch (e) {}
     try { globalThis.__eaReconcileStumbles = _rec; } catch (e) {}
   
-    // Auto-sync every 6h only when idle (no typing / no test for 60s)
+    // Auto-sync every 6h only when tab hidden / window unfocused / 2 min idle
     if (!window.__eaIdleSyncScheduled) {
       window.__eaIdleSyncScheduled = true;
       let lastActivity = Date.now();
       const bump = () => { lastActivity = Date.now(); };
-      ['keydown','mousemove','click','scroll'].forEach(ev => {
+      ['keydown', 'mousemove', 'mousedown', 'pointerdown', 'touchstart', 'click', 'scroll', 'wheel'].forEach((ev) => {
         try { document.addEventListener(ev, bump, { passive: true, capture: true }); } catch (e) {}
       });
+      try { window.addEventListener('focus', bump, { passive: true }); } catch (e) {}
       const SIX_H = 6 * 60 * 60 * 1000;
       const lastSyncKey = 'ea_last_auto_sync_ts';
       setInterval(async () => {
         try {
           const last = Number(localStorage.getItem(lastSyncKey) || 0);
           if (Date.now() - last < SIX_H) return;
-          if (Date.now() - lastActivity < 60000) return; // user active in last minute
-          if (document.querySelector('#words .word.active, #wordsInput, .pageTest #words')) {
-            // in a test
-            const active = document.querySelector('#words .word.active');
-            if (active) return;
-          }
+          if (!isSafeToBackgroundSync(lastActivity)) return;
+          if (document.querySelector('#words .word.active')) return;
           if (typeof isTestActive === 'function' && isTestActive()) return;
           localStorage.setItem(lastSyncKey, String(Date.now()));
-          console.log('[EA] idle auto-sync starting');
+          console.log('[EA] idle auto-sync starting (hidden/unfocused/2min idle)');
           await syncResults({ silent: true });
           try { await reconcileStumblesLastN(1000); } catch (e) {}
         } catch (e) { console.warn('[EA] idle sync', e); }
@@ -9281,9 +9313,234 @@
     } catch (e) {}
   }
 
+  /** Same match rules as live highlighting: exact = whole word, else substring. */
+  function wordMatchesActiveCombinations(word) {
+    const w = String(word || '');
+    if (!w) return false;
+    if (findExactRanges(w, mainExact).length) return true;
+    if (findExactRanges(w, redExact).length) return true;
+    if (findSubstringRanges(w, mainList).length) return true;
+    if (findSubstringRanges(w, redList).length) return true;
+    return false;
+  }
+
+  /**
+   * Prune the active hotlist's "<name> custom list" in localStorage.customText.
+   * Keeps a word only if it still contains at least one combination from the
+   * current main + red lists (exact or substring). Words that matched only
+   * removed digraphs/trigrams are deleted. Duplicates stay collapsed.
+   */
+  function pruneActiveCustomList() {
+    if (!store || !store.activeId) {
+      alert('No active hotlist.');
+      return;
+    }
+    rebuildLists();
+    const listName = practiceListNameForActive();
+    const obj = readCustomTextObject();
+    const raw = obj[listName];
+    if (typeof raw !== 'string' || !raw.trim()) {
+      alert('Custom list "' + listName + '" is empty or missing.');
+      return;
+    }
+    const before = uniqueWordsFromText(raw);
+    if (!before.length) {
+      alert('Custom list "' + listName + '" has no words.');
+      return;
+    }
+
+    const combos =
+      mainList.length + redList.length + mainExact.length + redExact.length;
+    if (combos === 0) {
+      if (!confirm(
+        'Hotlist "' + (store.lists[store.activeId].name || '') +
+        '" has no combinations left.\n\nRemove ALL ' + before.length +
+        ' words from "' + listName + '"?'
+      )) return;
+      try {
+        delete obj[listName];
+        localStorage.setItem('customText', JSON.stringify(obj));
+      } catch (e) {}
+      alert('Removed all words from "' + listName + '".');
+      return;
+    }
+
+    const kept = [];
+    const dropped = [];
+    for (const w of before) {
+      if (wordMatchesActiveCombinations(w)) kept.push(w);
+      else dropped.push(w);
+    }
+    const removed = dropped.length;
+
+    if (removed === 0) {
+      alert(
+        '"' + listName + '": all ' + kept.length +
+        ' unique words still match at least one of the ' + combos +
+        ' active combinations. Nothing removed.'
+      );
+      return;
+    }
+
+    const sample = (arr, n) => {
+      if (!arr.length) return '(none)';
+      const slice = arr.slice(0, n);
+      return slice.join(', ') + (arr.length > n ? ' …' : '');
+    };
+
+    if (!confirm(
+      'Prune "' + listName + '"?\n\n' +
+      'Total unique words now: ' + before.length + '\n' +
+      'Active combinations (main+red): ' + combos + '\n\n' +
+      'Keep: ' + kept.length + '\n' +
+      '  e.g. ' + sample(kept, 8) + '\n\n' +
+      'Remove: ' + removed + '\n' +
+      '  e.g. ' + sample(dropped, 8) + '\n\n' +
+      'Cancel leaves everything unchanged.\n' +
+      'OK only rewrites this custom text in local storage.'
+    )) return;
+
+    try {
+      if (kept.length) obj[listName] = kept.join(' ');
+      else delete obj[listName];
+      localStorage.setItem('customText', JSON.stringify(obj));
+      // Nudge MT UI if the custom texts panel is open
+      try {
+        window.dispatchEvent(new StorageEvent('storage', {
+          key: 'customText',
+          newValue: localStorage.getItem('customText')
+        }));
+      } catch (e2) {}
+    } catch (e) {
+      alert('Failed to write customText: ' + (e && e.message ? e.message : e));
+      return;
+    }
+    alert(
+      'Pruned "' + listName + '".\nKept ' + kept.length +
+      ', removed ' + removed + '.'
+    );
+  }
+
   function loadPracticeWordsFromLS() {
     // localStorage is the only source of truth — nothing to cache
   }
+
+  /** Hotlist / jail / low-confidence practice lists we reshuffle on each load. */
+  function isManagedPracticeListName(name) {
+    if (!name) return false;
+    const n = String(name).trim().toLowerCase();
+    if (n === 'jail' || n === 'low confidence' || n === 'low_confidence') return true;
+    if (/\s+custom\s+list\s*$/i.test(n)) return true;
+    return false;
+  }
+
+  function shuffleArrayInPlace(arr) {
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      const t = arr[i];
+      arr[i] = arr[j];
+      arr[j] = t;
+    }
+    return arr;
+  }
+
+  function tokenMultisetKey(tokens) {
+    return tokens.map((x) => String(x).toLowerCase()).slice().sort().join('\0');
+  }
+
+  /**
+   * On every page load/refresh: reshuffle every managed custom list in
+   * localStorage.customText. If customTextSettings currently holds one of
+   * those lists, rewrite settings.text to the new order so the next custom
+   * test uses the shuffled sequence.
+   */
+  function reshuffleAllManagedListsOnLoad() {
+    try {
+      const obj = readCustomTextObject();
+      const names = Object.keys(obj).filter(
+        (k) => typeof obj[k] === 'string' && isManagedPracticeListName(k)
+      );
+      if (!names.length) return;
+
+      const shuffledByName = {};
+      for (const name of names) {
+        const tokens = String(obj[name] || '').split(/\s+/).filter(Boolean);
+        if (tokens.length < 2) continue;
+        shuffleArrayInPlace(tokens);
+        obj[name] = tokens.join(' ');
+        shuffledByName[name] = tokens;
+      }
+      localStorage.setItem('customText', JSON.stringify(obj));
+
+      // Update active customTextSettings if it matches any managed list
+      let settings = null;
+      try {
+        settings = JSON.parse(localStorage.getItem('customTextSettings') || 'null');
+      } catch (e) {
+        settings = null;
+      }
+      if (settings && Array.isArray(settings.text) && settings.text.length) {
+        const activeKey = tokenMultisetKey(settings.text);
+        let matched = null;
+        for (const name of Object.keys(shuffledByName)) {
+          if (tokenMultisetKey(shuffledByName[name]) === activeKey) {
+            matched = name;
+            break;
+          }
+        }
+        // Fallback: same length + high overlap (handles minor punctuation diffs)
+        if (!matched) {
+          for (const name of Object.keys(shuffledByName)) {
+            const toks = shuffledByName[name];
+            if (toks.length !== settings.text.length) continue;
+            matched = name;
+            break;
+          }
+        }
+        if (matched) {
+          settings.text = shuffledByName[matched].slice();
+          if (settings.limit && typeof settings.limit === 'object') {
+            settings.limit.value = Math.max(settings.text.length, 1);
+          }
+          localStorage.setItem('customTextSettings', JSON.stringify(settings));
+          console.log(
+            '[Hotlist] refresh shuffle applied to active settings ←',
+            matched,
+            'tokens=',
+            settings.text.length
+          );
+        } else {
+          console.log(
+            '[Hotlist] refresh shuffled',
+            names.length,
+            'managed list(s); active settings not matched'
+          );
+        }
+      } else {
+        console.log('[Hotlist] refresh shuffled', names.length, 'managed list(s)');
+      }
+
+      // Best-effort push into MT runtime for each list
+      try {
+        const w = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+        const CT = w.CustomText;
+        if (CT && typeof CT.setCustomText === 'function') {
+          for (const name of Object.keys(shuffledByName)) {
+            try {
+              CT.setCustomText(name, shuffledByName[name].join(' '), false);
+            } catch (e3) {}
+          }
+        }
+      } catch (e4) {}
+    } catch (e) {
+      console.warn('[Hotlist] refresh shuffle failed', e);
+    }
+  }
+
+  // Early: before/with MT init so custom mode loads the new order
+  reshuffleAllManagedListsOnLoad();
+  // Once more after MT modules may have written defaults
+  setTimeout(reshuffleAllManagedListsOnLoad, 600);
 
   function mergeRanges(ranges) {
     if (ranges.length <= 1) return ranges;
@@ -9489,11 +9746,44 @@
     renderAll();
   }
 
+  /** Find the Behavior settings group — MT has renamed ids over time */
+  function findBehaviorGroup() {
+    // Classic id
+    let el = document.getElementById('group_behavior');
+    if (el) return el;
+    // data-group / data-id variants
+    el = document.querySelector(
+      '[id="group_behavior"], [data-group="behavior"], [data-id="behavior"], ' +
+      '#behavior, .settingsGroup[data-group="behavior"]'
+    );
+    if (el) return el;
+    // Locate by visible "behavior" group title inside settings page
+    const page = document.querySelector('.pageSettings, .page.settings, #settingsPage, main');
+    const root = page || document;
+    const titles = root.querySelectorAll('.groupTitle, h1, h2, h3, .title, .sectionTitle');
+    for (const t of titles) {
+      const text = (t.textContent || '').trim().toLowerCase();
+      if (text === 'behavior' || text.startsWith('behavior')) {
+        // Prefer the group container that holds tags/presets
+        const group = t.closest('.settingsGroup, .group, [id^="group_"], section') || t.parentElement;
+        if (group) return group;
+      }
+    }
+    // Fallback: parent of the tags section (always under behavior)
+    const tagsSection = root.querySelector(
+      '.section.tags, .section[data-id="tags"], .section:has(.tags), ' +
+      '#group_behavior .section'
+    );
+    if (tagsSection && tagsSection.parentElement) return tagsSection.parentElement;
+    // Last resort: entire settings content so UI still appears
+    return document.querySelector('.pageSettings .content, .pageSettings, .settings') || null;
+  }
+
   function createMenu() {
     const hotlistId = 'mtHotlistMenu';
     if (document.getElementById(hotlistId)) return;
 
-    const sections = document.getElementById('group_behavior');
+    const sections = findBehaviorGroup();
     if (!sections) return;
 
     const container = document.createElement('div');
@@ -9509,6 +9799,9 @@
           Create separate lists (e.g. per layout). Matching is case-insensitive.
           During <b>quote</b> tests, triggered words are saved to a custom text named
           after the active list (e.g. <b>graphite custom list</b>).
+          Use <b>prune custom</b> after removing digraphs/trigrams to drop words that
+          no longer match any remaining combination (words that still match another
+          active combo are kept).
         </span>
       </div>
       <div class="buttons">
@@ -9522,6 +9815,7 @@
           <button id="hotlistRenameBtn" type="button">rename</button>
           <button id="hotlistDeleteBtn" type="button">delete</button>
           <button id="hotlistBindBtn" type="button" title="Bind active list to a preset name">bind preset</button>
+          <button id="hotlistPruneBtn" type="button" title="Remove words from '&lt;list&gt; custom list' that no longer match any remaining digraph/trigram">prune custom</button>
           <span id="hotlistPresetBind" class="presetBind"></span>
         </div>
         <div class="hotlistColumns">
@@ -9644,6 +9938,7 @@
         lastPresetName = name.trim();
       }
     };
+    document.getElementById('hotlistPruneBtn').onclick = () => pruneActiveCustomList();
 
     mainInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
@@ -9917,8 +10212,11 @@
           continue;
         }
 
-        if (node.classList?.contains('pageSettings')) {
-          createMenu();
+        if (node.classList?.contains('pageSettings') ||
+            node.classList?.contains('settings') ||
+            (node.id && /settings/i.test(node.id)) ||
+            node.querySelector?.('#group_behavior, .section.tags, .groupTitle')) {
+          setTimeout(() => { try { createMenu(); } catch (e) {} }, 50);
           continue;
         }
 
@@ -9990,10 +10288,36 @@
     attributeFilter: ['class']
   });
 
-  if (document.getElementById('group_behavior')) createMenu();
+  function tryCreateMenu() {
+    try { createMenu(); } catch (e) { console.warn('[Hotlist] createMenu', e); }
+  }
+  tryCreateMenu();
+  // Settings is a SPA page — retry when route becomes /settings
+  let _hlSettingsTries = 0;
+  const _hlSettingsTimer = setInterval(() => {
+    _hlSettingsTries++;
+    if (document.getElementById('mtHotlistMenu')) {
+      clearInterval(_hlSettingsTimer);
+      return;
+    }
+    if (/\/settings/i.test(location.pathname + location.hash) || document.querySelector('.pageSettings')) {
+      tryCreateMenu();
+    }
+    if (_hlSettingsTries > 40) clearInterval(_hlSettingsTimer); // ~20s
+  }, 500);
+
+  // Also on history navigation
+  const _hlPush = history.pushState;
+  history.pushState = function () {
+    const r = _hlPush.apply(this, arguments);
+    setTimeout(tryCreateMenu, 300);
+    return r;
+  };
+  window.addEventListener('popstate', () => setTimeout(tryCreateMenu, 300));
 
   window.addEventListener('beforeunload', () => {
     try { observer.disconnect(); } catch (e) {}
+    try { clearInterval(_hlSettingsTimer); } catch (e) {}
   });
 
   } catch (err) {
