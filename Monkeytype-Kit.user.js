@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Monkeytype Kit Full (Archive + Jail + Hotlist + Dictation + Key Confidence)
 // @namespace    https://monkeytype.com/kit
-// @version      2.2.77
+// @version      2.3.2
 // @description  Bundle: Eternal Archive, Jail, Hotlist, Dictation, Key Confidence + Best WPM. Single Ape Key in Archive panel.
 // @author       kitkat + Grok
 // @match        https://monkeytype.com/*
@@ -1643,6 +1643,7 @@
   // Track by target word TEXT when active/typed word shows real error letters.
   // Do NOT use letter.corrected (overcounts) or data-wordindex (inflates totals).
   const stumbledWordTexts = new Set();
+  const stumbledWordIndexes = new Set(); // by position — independent of indicateTypos mode
   let lastStumbleSnapshot = null;
   let scanScheduled = false;
   let lastScanAt = 0;
@@ -1675,6 +1676,7 @@
 
   function clearStumbleState() {
     stumbledWordTexts.clear();
+    try { stumbledWordIndexes.clear(); } catch (e) {}
     lastStumbleSnapshot = null;
     try {
       sessionStorage.removeItem(SS_STUMBLE);
@@ -1690,33 +1692,54 @@
     return t;
   }
 
-  /** Target word only — never typed .extra letters from textContent */
+  /** Target word only — never typed .extra / hint letters from indicate-typos UI */
   function wordTargetText(el) {
     if (!el) return '';
+    // data-word is always the intended token (independent of indicateTypos mode)
     const dw = el.getAttribute('data-word');
     if (dw) return cleanWordText(dw);
     let s = '';
-    el.querySelectorAll('letter, .letter').forEach((l) => {
+    // Only top-level letters — skip hint nodes used by below/both modes
+    const letters = el.querySelectorAll('letter, .letter');
+    letters.forEach((l) => {
+      if (l.closest && l.closest('hint, .hint')) return;
       if (l.classList.contains('extra')) return;
-      s += (l.textContent || '');
+      if (l.classList.contains('hint')) return;
+      if (l.tagName && l.tagName.toLowerCase() === 'hint') return;
+      // Prefer original char attrs if present
+      const orig = l.getAttribute('data-correct') || l.getAttribute('data-letter') || l.getAttribute('data-char');
+      if (orig) { s += orig; return; }
+      // In replace/both, textContent is the typed char — still better than including hints
+      const t = (l.textContent || '').replace(/\s+/g, '');
+      if (t) s += t[0];
     });
     if (s) return cleanWordText(s);
+    // Last resort: clone without hints
+    try {
+      const clone = el.cloneNode(true);
+      clone.querySelectorAll('hint, .hint').forEach((h) => h.remove());
+      return cleanWordText(clone.textContent || '');
+    } catch (e) {}
     return cleanWordText(el.textContent || '');
   }
 
   function letterErrorSelector() {
-    // Any hard error OR corrected letter = the word was stumbled
-    // (punctuation mistakes on we'll / this, count too)
+    // Hard errors + corrected (fixed typos) — works for off/below/replace/both
     return (
-      'letter.incorrect, letter.extra, letter.missed, letter.corrected, ' +
-      '.letter.incorrect, .letter.extra, .letter.missed, .letter.corrected'
+      'letter.incorrect, letter.extra, letter.missed, letter.corrected, letter.error, ' +
+      '.letter.incorrect, .letter.extra, .letter.missed, .letter.corrected, .letter.error'
     );
   }
 
   function wordHasMistake(w) {
     if (!w) return false;
     if (w.classList && w.classList.contains('error')) return true;
-    return !!w.querySelector(letterErrorSelector());
+    // below/both modes inject <hint> for typo positions — count as stumble
+    if (w.querySelector && w.querySelector('hint, .hint')) return true;
+    if (w.querySelector && w.querySelector(letterErrorSelector())) return true;
+    // Some themes mark the word with error classes on the container
+    if (w.classList && (w.classList.contains('error') || w.classList.contains('incorrect'))) return true;
+    return false;
   }
 
   function isRealWordEl(w) {
@@ -1740,6 +1763,7 @@
   function wasReachedWord(w) {
     if (!w) return false;
     if (w.classList.contains('typed') || w.classList.contains('error')) return true;
+    if (w.querySelector('hint, .hint')) return true;
     return !!w.querySelector(
       'letter.correct, letter.incorrect, letter.corrected, letter.extra, letter.missed, ' +
       '.letter.correct, .letter.incorrect, .letter.corrected, .letter.extra, .letter.missed'
@@ -1760,29 +1784,37 @@
     return live;
   }
 
+  function wordIndexOf(w) {
+    if (!w) return -1;
+    const attr = w.getAttribute('data-wordindex') || w.getAttribute('data-index');
+    if (attr != null && attr !== '') {
+      const n = parseInt(attr, 10);
+      if (!isNaN(n)) return n;
+    }
+    const parent = w.parentElement;
+    if (!parent) return -1;
+    const all = Array.from(parent.querySelectorAll('.word')).filter(isRealWordEl);
+    return all.indexOf(w);
+  }
+
   function captureMistakesImmediate() {
     try {
+      const mark = (w) => {
+        if (!w || !isRealWordEl(w) || !wordHasMistake(w)) return;
+        const t = wordTargetText(w);
+        if (t) stumbledWordTexts.add(t);
+        const idx = wordIndexOf(w);
+        if (idx >= 0) stumbledWordIndexes.add(idx);
+      };
       // Active word while typing
-      const active = document.querySelector('#words .word.active');
-      if (active && isRealWordEl(active) && wordHasMistake(active)) {
-        const t = wordTargetText(active);
-        if (t) stumbledWordTexts.add(t);
-      }
-      // Live words with error/corrected (only real tokens)
-      document.querySelectorAll('#words .word').forEach((w) => {
-        if (!isRealWordEl(w) || !wordHasMistake(w)) return;
-        const t = wordTargetText(w);
-        if (t) stumbledWordTexts.add(t);
-      });
-      // Result history: each .word = one space-delimited token
+      mark(document.querySelector('#words .word.active'));
+      // Live words with error/corrected/hint
+      document.querySelectorAll('#words .word').forEach(mark);
+      // Result / input history
       document.querySelectorAll(
-        '#resultWordsHistory .word, #wordsHistory .word, .resultWordsHistory .word'
-      ).forEach((w) => {
-        if (!isRealWordEl(w) || !wordHasMistake(w)) return;
-        const t = wordTargetText(w);
-        if (t) stumbledWordTexts.add(t);
-      });
-      if (stumbledWordTexts.size) persistStumbleState();
+        '#resultWordsHistory .word, #wordsHistory .word, .resultWordsHistory .word, .inputHistory .word'
+      ).forEach(mark);
+      if (stumbledWordTexts.size || stumbledWordIndexes.size) persistStumbleState();
     } catch (e) {}
   }
 
@@ -1816,26 +1848,31 @@
         if (!active) return;
         // Backspace while word has any error/corrected letter, or any key while incorrect visible
         const hasHard = !!active.querySelector(
-          'letter.incorrect, letter.extra, letter.missed, .letter.incorrect, .letter.extra, .letter.missed'
+          'letter.incorrect, letter.extra, letter.missed, letter.corrected, ' +
+          '.letter.incorrect, .letter.extra, .letter.missed, .letter.corrected, hint, .hint'
         );
         const hasCorr = !!active.querySelector('letter.corrected, .letter.corrected');
         if (hasHard || (e.key === 'Backspace' && (hasHard || hasCorr)) || hasCorr) {
           const t = wordTargetText(active);
-          if (t) {
-            stumbledWordTexts.add(t);
-            persistStumbleState();
-          }
+          if (t) stumbledWordTexts.add(t);
+          const idx = wordIndexOf(active);
+          if (idx >= 0) stumbledWordIndexes.add(idx);
+          persistStumbleState();
         }
       } catch (err) {}
     }, true);
   }
 
+  let observedWordsElMistake = null;
   function bindWordsMistakeObserver() {
     const root = document.getElementById('words');
     if (!root) return;
+    // Same live node already observed — nothing to do
+    if (wordsMistakeObserver && observedWordsElMistake === root) return;
     if (wordsMistakeObserver) {
       try { wordsMistakeObserver.disconnect(); } catch (e) {}
     }
+    observedWordsElMistake = root;
     wordsMistakeObserver = new MutationObserver(() => {
       captureMistakesImmediate();
     });
@@ -1848,36 +1885,126 @@
       });
     } catch (e) {}
   }
-  setInterval(bindWordsMistakeObserver, 1000);
-  setTimeout(bindWordsMistakeObserver, 300);
+  setInterval(bindWordsMistakeObserver, 500);
+  setTimeout(bindWordsMistakeObserver, 200);
+
+  // When Monkeytype settings change without full page reload, #words is rebuilt and
+  // observers were left on detached nodes → stumbles read as 0 / wrong. Rebind + reset.
+  let eaLastConfigSig = '';
+  let eaLastWordsNode = null;
+  function eaReadConfigSig() {
+    try {
+      const w = pageWin();
+      const c = w.Config || w.config || null;
+      if (!c) return '';
+      return [
+        c.indicateTypos, c.stopOnWord, c.mode, c.blindMode, c.difficulty,
+        c.confidenceMode, c.freedomMode, c.quickRestart
+      ].map((x) => String(x)).join('|');
+    } catch (e) { return ''; }
+  }
+  function eaOnWordsOrConfigChanged(reason) {
+    try {
+      console.log('[EA] rebind stumbles:', reason);
+      clearStumbleState();
+      frozenStumbleSnapshot = null;
+      lastStumbleSnapshot = null;
+      observedWordsElMistake = null;
+      observedWordsElScan = null;
+      bindWordsMistakeObserver();
+      bindWordsObserver();
+      if (typeof bindObservers === 'function') {
+        try { bindObservers(); } catch (e) {}
+      }
+    } catch (e) {}
+  }
+  setInterval(() => {
+    try {
+      const words = document.getElementById('words');
+      if (words !== eaLastWordsNode) {
+        const prev = eaLastWordsNode;
+        eaLastWordsNode = words;
+        if (prev != null || words != null) {
+          // Node replaced (settings apply / new test shell) — rebind observers
+          observedWordsElMistake = null;
+          observedWordsElScan = null;
+          bindWordsMistakeObserver();
+          bindWordsObserver();
+        }
+      }
+      const sig = eaReadConfigSig();
+      if (sig && eaLastConfigSig && sig !== eaLastConfigSig) {
+        eaOnWordsOrConfigChanged('config ' + eaLastConfigSig + ' → ' + sig);
+      }
+      if (sig) eaLastConfigSig = sig;
+    } catch (e) {}
+  }, 400);
+
+  // Also watch typingTest container for #words being swapped out
+  (function eaWatchTypingShell() {
+    const attach = () => {
+      const shell = document.getElementById('typingTest') || document.getElementById('centerContent') || document.body;
+      if (!shell || shell.__eaWordsWatch) return;
+      shell.__eaWordsWatch = true;
+      try {
+        new MutationObserver(() => {
+          const words = document.getElementById('words');
+          if (words && words !== observedWordsElMistake) {
+            observedWordsElMistake = null;
+            observedWordsElScan = null;
+            bindWordsMistakeObserver();
+            bindWordsObserver();
+          }
+        }).observe(shell, { childList: true, subtree: true });
+      } catch (e) {}
+    };
+    setTimeout(attach, 500);
+    setInterval(attach, 3000);
+  })();
+
 
   function finalizeSnapshotFromState() {
     const words = getTestWordElements();
-    // total = number of space-delimited word slots in this test (NOT unique texts)
+    // total = space-delimited word slots (each word = at most 1 stumble)
     let total = words.length;
 
-    // Mark mistakes by INDEX on this same list (repeated words each count separately)
+    // Prefer final DOM (input history): each .word with any error = 1 stumble
     const stumbledIdx = new Set();
+    let domFound = 0;
     words.forEach((w, idx) => {
       if (wordHasMistake(w)) {
         stumbledIdx.add(idx);
+        domFound++;
         const t = wordTargetText(w);
         if (t) stumbledWordTexts.add(t);
       }
     });
 
-    // Also keep any texts we saw live; map them onto first unmatched occurrence of that token
-    const used = new Set(stumbledIdx);
-    for (const t of stumbledWordTexts) {
-      const lower = String(t).toLowerCase();
-      for (let idx = 0; idx < words.length; idx++) {
-        if (used.has(idx)) continue;
-        const wt = wordTargetText(words[idx]);
-        if (!wt) continue;
-        if (wt === t || wt.toLowerCase() === lower) {
-          stumbledIdx.add(idx);
-          used.add(idx);
-          break; // one occurrence per recorded stumble text pass; loop continues for next text
+    // Live indexes only fill gaps when history lost error classes
+    // (never invent extra stumbles beyond words that actually exist)
+    if (domFound === 0 && stumbledWordIndexes.size) {
+      for (const idx of stumbledWordIndexes) {
+        if (idx >= 0 && idx < words.length) stumbledIdx.add(idx);
+      }
+    } else {
+      // Merge live indexes only for slots still in range; DOM already authoritative
+      // when it found mistakes — skip text-expansion that over-counts
+    }
+
+    // Text fallback ONLY if still empty (history not open, classes gone)
+    if (stumbledIdx.size === 0 && stumbledWordTexts.size && words.length) {
+      const used = new Set();
+      for (const t of stumbledWordTexts) {
+        const lower = String(t).toLowerCase();
+        for (let idx = 0; idx < words.length; idx++) {
+          if (used.has(idx)) continue;
+          const wt = wordTargetText(words[idx]);
+          if (!wt) continue;
+          if (wt === t || wt.toLowerCase() === lower) {
+            stumbledIdx.add(idx);
+            used.add(idx);
+            break; // one slot per tracked text — never multi-count one word
+          }
         }
       }
     }
@@ -1985,11 +2112,17 @@
     scheduleScan();
   }, true);
 
-  // Observe ONLY #words when it exists — not the whole document
+  // Observe ONLY #words when it exists — rebind when MT replaces the node (settings change)
   let wordsObserver = null;
+  let observedWordsElScan = null;
   function bindWordsObserver() {
     const root = document.getElementById('words');
-    if (!root || wordsObserver) return;
+    if (!root) return;
+    if (wordsObserver && observedWordsElScan === root) return;
+    if (wordsObserver) {
+      try { wordsObserver.disconnect(); } catch (e) {}
+    }
+    observedWordsElScan = root;
     wordsObserver = new MutationObserver(() => scheduleScan());
     try {
       wordsObserver.observe(root, {
@@ -2000,8 +2133,8 @@
       });
     } catch (e) {}
   }
-  setInterval(bindWordsObserver, 2000);
-  setTimeout(bindWordsObserver, 500);
+  setInterval(bindWordsObserver, 500);
+  setTimeout(bindWordsObserver, 300);
 
   function isResultScreenVisible() {
     if (document.getElementById('resultWordsHistory') ||
@@ -2219,24 +2352,7 @@
     try { captureMistakesImmediate(); } catch (e) {}
     try { scanWordsNow(); } catch (e) {}
     finalizeSnapshotFromState();
-    // If we tracked mistake texts, force count even when result DOM lost error classes
-    if (stumbledWordTexts.size && lastStumbleSnapshot) {
-      const words = getTestWordElements();
-      const total = words.length || lastStumbleSnapshot.total || stumbledWordTexts.size;
-      const present = new Set(words.map(wordTargetText).filter(Boolean));
-      let stumbled = 0;
-      for (const t of stumbledWordTexts) {
-        // Count if present in test, OR if present set empty (history not open yet)
-        if (!present.size || present.has(t)) stumbled++;
-      }
-      stumbled = Math.min(stumbled, total || stumbled);
-      lastStumbleSnapshot = {
-        stumbled,
-        clean: Math.max(0, (total || stumbled) - stumbled),
-        total: total || stumbled,
-        stumblePct: (total || stumbled) ? (stumbled / (total || stumbled)) * 100 : 0
-      };
-    }
+    // Trust finalizeSnapshotFromState (1 word slot = at most 1 stumble)
     if (lastStumbleSnapshot && lastStumbleSnapshot.total > 0) {
       // Keep best freeze (don't overwrite a good freeze with a later 0)
       if (
