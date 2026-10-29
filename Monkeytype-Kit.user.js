@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Monkeytype Kit Full (Archive + Jail + Hotlist + Dictation + Key Confidence)
 // @namespace    https://monkeytype.com/kit
-// @version      2.3.2
+// @version      2.3.7
 // @description  Bundle: Eternal Archive, Jail, Hotlist, Dictation, Key Confidence + Best WPM. Single Ape Key in Archive panel.
 // @author       kitkat + Grok
 // @match        https://monkeytype.com/*
@@ -452,7 +452,7 @@
     savePendingStumbles(filtered);
   }
 
-  
+
   /** Fallback when MT no longer uses .group classes — parse #result.innerText */
   function scrapeResultFromInnerText() {
     const root = document.querySelector('#result') || document.querySelector('.pageResult');
@@ -477,7 +477,7 @@
     if (!block || block.length < 10) return null;
 
     const out = {};
-    // Collect all wpm candidates; NEVER take a number that is the "100" from "100%" 
+    // Collect all wpm candidates; NEVER take a number that is the "100" from "100%"
     const allWpm = [];
     const re = /\bwpm\b([^\d%]{0,15})(\d+(?:\.\d+)?)(\s*%)?/gi;
     let m;
@@ -535,7 +535,7 @@
     return null;
   }
 
-  
+
   function readWpmFromResultDOM() {
     try {
       const parseNum = (t, min, max) => {
@@ -601,7 +601,7 @@
     }
   }
 
-  
+
   function readNumFromResultGroup(groupClass) {
     try {
       const parseNum = (t) => {
@@ -658,7 +658,7 @@
     } catch (e) { return null; }
   }
 
-  
+
   function readResultGroupMap() {
     // Parse #result .group blocks: { "test type": "quote short english", "tags": "eclipse", ... }
     const map = {};
@@ -1837,7 +1837,7 @@
 
   // Observe letter class changes while typing (more reliable than keys alone)
   let wordsMistakeObserver = null;
-  
+
   // Fallback: key activity can mark a stumble even if MutationObserver misses a brief incorrect class
   if (!window.__eaStumbleKeyProbe) {
     window.__eaStumbleKeyProbe = true;
@@ -3038,21 +3038,35 @@
         eaLastGoodStumble = null;
       }
 
-      // Always refresh open archive so the new point appears without Import/Update
-      if (typeof panelOpen !== 'undefined' && panelOpen) {
+      // Chart already updated by appendLiveToCharts — do NOT call renderArchive()
+      // (that reloaded stale __eaCachedAll and wiped the new point + zoom).
+      // Just nudge the open chart to show the new tip if zoomed near the end.
+      if (typeof panelOpen !== 'undefined' && panelOpen && chartInstance) {
         try {
-          // Clear zoom on main chart so the newest test is not off-screen
-          if (chartInstance) {
-            try {
-              if (chartInstance.options?.scales?.x) {
-                delete chartInstance.options.scales.x.min;
-                delete chartInstance.options.scales.x.max;
+          const xAxis = chartInstance.options && chartInstance.options.scales && chartInstance.options.scales.x;
+          const n = (window.__eaLastFiltered && window.__eaLastFiltered.length) || 0;
+          if (xAxis && n > 0) {
+            const lastX = n - 1;
+            // If user was scrolled near the right edge, keep them there with the new point
+            if (xAxis.max != null && Number(xAxis.max) >= lastX - 5) {
+              const span = (Number(xAxis.max) - Number(xAxis.min || 0)) || 20;
+              xAxis.max = lastX + Math.max(2, Math.ceil(span * 0.05));
+              if (xAxis.min != null && Number(xAxis.max) - Number(xAxis.min) < span * 0.5) {
+                xAxis.min = Math.max(0, Number(xAxis.max) - span);
               }
-              chartInstance.$eaFullX = null; try { chartInstance.$eaDataX = null; } catch (e2) {}
-            } catch (e) {}
+            }
+            chartInstance.update('none');
           }
-          await renderArchive();
-        } catch (e) { console.warn('[EA] refresh after save', e); }
+          // Update stats bar count
+          const stats = document.getElementById('ea-stats');
+          if (stats && window.__eaLastFiltered) {
+            const n2 = window.__eaLastFiltered.length;
+            stats.innerHTML = stats.innerHTML.replace(
+              /Showing\s*<b>[\d,]+<\/b>/,
+              'Showing <b>' + n2.toLocaleString() + '</b>'
+            );
+          }
+        } catch (e) { console.warn('[EA] post-save chart nudge', e); }
       }
     } catch (e) {
       console.warn('[EA] tryCaptureFromPage', e);
@@ -4425,6 +4439,7 @@
     try { bindWheelZoomToChart(chartInstance); } catch (e) {}
     try { pinScaleLabels(chartInstance, '#ea-main-frame'); } catch (e) {}
     try { window.__eaLastFiltered = results; } catch (e) {}
+    try { eaRememberFullRender(results); } catch (e) {}
   }
 
   /** Append one matching result to existing per-test chart — O(1), no full refilter */
@@ -4715,18 +4730,382 @@
   }
 
 
-  function appendLiveToCharts(r) {
+
+
+  /*********************************************************************
+   *  Incremental graph cache — reuse prior Apply work when only new
+   *  tests arrive under the same filters / trueAverage setting.
+   *********************************************************************/
+  function eaFilterSignature() {
+    try {
+      return JSON.stringify({
+        f: currentFilters || {},
+        ta: !!trueAverage,
+        md: Number(maxDots) || 5000
+      });
+    } catch (e) {
+      return String(Date.now());
+    }
+  }
+
+  function eaEnsureGraphCache() {
+    if (!window.__eaGraphCache) {
+      window.__eaGraphCache = {
+        sig: '',
+        filtered: [],
+        daily: null,
+        monthly: null,
+        improve: null,
+        improveOpen: null // { tests:[], sec:0 }
+      };
+    }
+    return window.__eaGraphCache;
+  }
+
+  function eaInvalidateGraphCache(reason) {
+    window.__eaGraphCache = {
+      sig: '',
+      filtered: [],
+      daily: null,
+      monthly: null,
+      improve: null,
+      improveOpen: null
+    };
+    if (reason) console.log('[EA] graph cache cleared:', reason);
+  }
+
+  /** Day key YYYY-MM-DD local */
+  function eaDayKey(ts) {
+    const d = new Date(ts);
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  }
+  function eaMonthKey(ts) {
+    const d = new Date(ts);
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+  }
+
+  /**
+   * Recompute moving averages from index `from` to end (from = max(0, n-newCount-100)).
+   * Patches chart avg datasets in place.
+   */
+  function refreshAveragesTail(chart, filtered, lastX) {
+    if (!chart || !chart.data || !chart.data.datasets || !filtered || !filtered.length) return;
+    const n = filtered.length;
+    // How many brand-new points vs previous cache?
+    const cache = eaEnsureGraphCache();
+    const prevN = Array.isArray(cache.filtered) ? cache.filtered.length : 0;
+    const newCount = Math.max(0, n - prevN);
+    // Continuity for avg-of-100: recompute from (new start - 100)
+    const tailStart = Math.max(0, n - newCount - 100);
+    const wpmData = filtered.map(r => r.wpm);
+    const accData = filtered.map(r => r.acc);
+    const stumbleData = filtered.map(r => (r.stumblePct != null ? r.stumblePct : null));
+    const charWeights = filtered.map(r => resultCharCount(r));
+    const avg10Wpm = computeMovingAvg(wpmData, 10, charWeights);
+    const avg100Wpm = computeMovingAvg(wpmData, 100, charWeights);
+    const avg10Acc = computeMovingAvg(accData, 10, charWeights);
+    const avg100Acc = computeMovingAvg(accData, 100, charWeights);
+    const stumbleForAvg = stumbleData.map(v => (v == null ? NaN : v));
+    function movingAvgSparse(data, window) {
+      const out = new Array(data.length).fill(null);
+      const useW = !!trueAverage;
+      for (let i = tailStart; i < data.length; i++) {
+        let sum = 0, wsum = 0, cnt = 0;
+        for (let j = i; j >= 0 && cnt < window; j--) {
+          if (data[j] == null || Number.isNaN(data[j])) continue;
+          if (useW) {
+            const w = charWeights[j] || 1;
+            sum += data[j] * w;
+            wsum += w;
+          } else {
+            sum += data[j];
+          }
+          cnt++;
+        }
+        out[i] = useW ? (wsum ? sum / wsum : null) : (cnt ? sum / cnt : null);
+      }
+      return out;
+    }
+    const avg10Stumble = movingAvgSparse(stumbleForAvg, 10);
+    const avg100Stumble = movingAvgSparse(stumbleForAvg, 100);
+
+    const setTail = (label, arr, transform) => {
+      const d = chart.data.datasets.find(ds => ds.label === label);
+      if (!d) return;
+      if (!Array.isArray(d.data)) d.data = [];
+      d.data = d.data.filter(p => p && p.x != null && p.x < tailStart);
+      for (let i = tailStart; i < n; i++) {
+        let y = arr[i];
+        if (y == null || Number.isNaN(y)) continue;
+        if (transform) y = transform(y);
+        d.data.push({ x: i, y });
+      }
+    };
+    setTail('Avg of 10 (WPM)', avg10Wpm, null);
+    setTail('Avg of 100 (WPM)', avg100Wpm, null);
+    setTail('Avg of 10 (Acc)', avg10Acc, y => Math.max(90, y));
+    setTail('Avg of 100 (Acc)', avg100Acc, y => Math.max(90, y));
+    setTail('Avg of 10 (Stumble %)', avg10Stumble, y => Math.min(30, y));
+    setTail('Avg of 100 (Stumble %)', avg100Stumble, y => Math.min(30, y));
+  }
+
+  /** Patch daily aggregates for day keys touched by `newOnes`. */
+  function eaIncrementalDaily(prevDaily, allFiltered, newOnes) {
+    if (!newOnes || !newOnes.length) return prevDaily;
+    const touched = new Set();
+    newOnes.forEach(r => {
+      const ts = resultTsMs(r);
+      if (ts) touched.add(eaDayKey(ts));
+    });
+    if (!touched.size) return prevDaily;
+    // Rebuild only touched days from full filtered list
+    const byDay = new Map();
+    allFiltered.forEach(r => {
+      const ts = resultTsMs(r);
+      if (!ts) return;
+      const key = eaDayKey(ts);
+      if (!touched.has(key)) return;
+      if (!byDay.has(key)) byDay.set(key, []);
+      byDay.get(key).push(r);
+    });
+    let daily = Array.isArray(prevDaily) ? prevDaily.slice() : [];
+    const byLabel = new Map(daily.map((d, i) => [d.label, i]));
+    const startLabel = daily.length ? daily[0].label : null;
+    const startDate = startLabel ? new Date(startLabel + 'T00:00:00') : null;
+
+    [...touched].sort().forEach(day => {
+      const list = byDay.get(day) || [];
+      if (!list.length) return;
+      const cur = new Date(day + 'T00:00:00');
+      const daysSinceStart = startDate
+        ? Math.round((cur - startDate) / 86400000)
+        : 0;
+      const row = {
+        label: day,
+        shortLabel: day.slice(5),
+        daysSinceStart,
+        pointIndex: 0,
+        avgWpm: weightedMeanFromResults(list, r => r.wpm),
+        avgAcc: weightedMeanFromResults(list, r => r.acc),
+        avgStumble: weightedMeanFromResults(
+          list.filter(r => r.stumblePct != null && isFinite(r.stumblePct)),
+          r => r.stumblePct
+        ),
+        stumbleCount: countWithStumble(list),
+        count: list.length
+      };
+      if (byLabel.has(day)) {
+        const idx = byLabel.get(day);
+        row.pointIndex = daily[idx].pointIndex;
+        daily[idx] = row;
+      } else {
+        // New day after previous series — append
+        row.pointIndex = daily.length + 1;
+        if (!startDate && daily.length === 0) {
+          row.daysSinceStart = 0;
+        }
+        daily.push(row);
+        byLabel.set(day, daily.length - 1);
+      }
+    });
+    // Keep chronological order
+    daily.sort((a, b) => String(a.label).localeCompare(String(b.label)));
+    daily.forEach((d, i) => { d.pointIndex = i + 1; });
+    if (daily.length) {
+      const s0 = new Date(daily[0].label + 'T00:00:00');
+      daily.forEach(d => {
+        d.daysSinceStart = Math.round((new Date(d.label + 'T00:00:00') - s0) / 86400000);
+      });
+    }
+    return daily;
+  }
+
+  function eaIncrementalMonthly(prevMonthly, allFiltered, newOnes) {
+    if (!newOnes || !newOnes.length) return prevMonthly;
+    const touched = new Set();
+    newOnes.forEach(r => {
+      const ts = resultTsMs(r);
+      if (ts) touched.add(eaMonthKey(ts));
+    });
+    if (!touched.size) return prevMonthly;
+    const byMonth = new Map();
+    allFiltered.forEach(r => {
+      const ts = resultTsMs(r);
+      if (!ts) return;
+      const key = eaMonthKey(ts);
+      if (!touched.has(key)) return;
+      if (!byMonth.has(key)) byMonth.set(key, []);
+      byMonth.get(key).push(r);
+    });
+    let monthly = Array.isArray(prevMonthly) ? prevMonthly.slice() : [];
+    const byLabel = new Map(monthly.map((d, i) => [d.label, i]));
+    [...touched].sort().forEach(month => {
+      const list = byMonth.get(month) || [];
+      if (!list.length) return;
+      const row = {
+        label: month,
+        shortLabel: month,
+        monthsSinceStart: 0,
+        pointIndex: 0,
+        avgWpm: weightedMeanFromResults(list, r => r.wpm),
+        avgAcc: weightedMeanFromResults(list, r => r.acc),
+        avgStumble: weightedMeanFromResults(
+          list.filter(r => r.stumblePct != null && isFinite(r.stumblePct)),
+          r => r.stumblePct
+        ),
+        stumbleCount: countWithStumble(list),
+        count: list.length
+      };
+      if (byLabel.has(month)) {
+        const idx = byLabel.get(month);
+        row.pointIndex = monthly[idx].pointIndex;
+        monthly[idx] = row;
+      } else {
+        monthly.push(row);
+        byLabel.set(month, monthly.length - 1);
+      }
+    });
+    monthly.sort((a, b) => String(a.label).localeCompare(String(b.label)));
+    if (monthly.length) {
+      const [sy, sm] = monthly[0].label.split('-').map(Number);
+      monthly.forEach((d, i) => {
+        const [y, m] = d.label.split('-').map(Number);
+        d.monthsSinceStart = (y - sy) * 12 + (m - sm);
+        d.pointIndex = i + 1;
+      });
+    }
+    return monthly;
+  }
+
+  /**
+   * If filtered is previous list + a few new results at the end (same filter),
+   * extend charts instead of full O(N) rebuild.
+   */
+  function tryIncrementalGraph(filtered) {
+    try {
+      if (!filtered || !filtered.length) return false;
+      if (!chartInstance || !chartInstance.data || !chartInstance.data.datasets) return false;
+      const cache = eaEnsureGraphCache();
+      const sig = eaFilterSignature();
+      if (cache.sig && cache.sig !== sig) {
+        eaInvalidateGraphCache('filter/trueAverage changed');
+        return false;
+      }
+      const prev = (cache.filtered && cache.filtered.length) ? cache.filtered : window.__eaLastFiltered;
+      if (!Array.isArray(prev) || prev.length < 5) return false;
+      if (filtered.length < prev.length) return false;
+      if (filtered.length - prev.length > 80) return false;
+      // Same prefix anchors
+      const anchors = [0, Math.floor(prev.length / 2), prev.length - 1];
+      for (const i of anchors) {
+        const a = prev[i], b = filtered[i];
+        if (!a || !b) return false;
+        if (a.id && b.id && a.id === b.id) continue;
+        if (Math.abs(Number(a.wpm) - Number(b.wpm)) > 0.05) return false;
+        if (Math.abs((Number(a.timestamp) || 0) - (Number(b.timestamp) || 0)) > 2000) return false;
+      }
+      const newOnes = filtered.slice(prev.length);
+      window.__eaLastFiltered = filtered.slice(0, prev.length);
+      for (const r of newOnes) {
+        appendLiveToCharts(r, { force: true });
+      }
+      window.__eaLastFiltered = filtered;
+      // Patch daily / monthly / improve caches
+      cache.daily = eaIncrementalDaily(cache.daily, filtered, newOnes);
+      cache.monthly = eaIncrementalMonthly(cache.monthly, filtered, newOnes);
+      cache.filtered = filtered.slice();
+      cache.sig = sig;
+      // Re-render dependent charts from patched aggregates (cheap — few points)
+      try {
+        if (cache.daily && cache.daily.length && typeof renderDailyFromAgg === 'function') {
+          renderDailyFromAgg(cache.daily);
+        } else if (typeof renderDailyGraph === 'function') {
+          // force use of cache via side channel
+          window.__eaDailyAggOverride = cache.daily;
+          renderDailyGraph(filtered);
+          window.__eaDailyAggOverride = null;
+        }
+      } catch (e) {}
+      try {
+        if (cache.monthly && cache.monthly.length) {
+          window.__eaMonthlyAggOverride = cache.monthly;
+          renderMonthlyGraph(filtered);
+          window.__eaMonthlyAggOverride = null;
+        }
+      } catch (e) {}
+      // Improve/delta: small series — rebuild only if new tests may close a block
+      try {
+        if (typeof renderImproveGraph === 'function') renderImproveGraph(filtered);
+      } catch (e) {}
+      return true;
+    } catch (e) {
+      console.warn('[EA] tryIncrementalGraph', e);
+      return false;
+    }
+  }
+
+  function eaRememberFullRender(filtered) {
+    const cache = eaEnsureGraphCache();
+    cache.sig = eaFilterSignature();
+    cache.filtered = Array.isArray(filtered) ? filtered.slice() : [];
+    try { cache.daily = buildDailyAggregates(filtered); } catch (e) { cache.daily = null; }
+    try { cache.monthly = buildMonthlyAggregates(filtered); } catch (e) { cache.monthly = null; }
+    try { cache.improve = buildImprovementSeries(filtered); } catch (e) { cache.improve = null; }
+  }
+
+
+
+  function eaSaveChartZoom() {
+    try {
+      if (!chartInstance || !chartInstance.options || !chartInstance.options.scales) return;
+      const x = chartInstance.options.scales.x || {};
+      const y = chartInstance.options.scales.y || {};
+      const state = {
+        xMin: x.min, xMax: x.max,
+        yMin: y.min, yMax: y.max,
+        filterSig: (typeof eaFilterSignature === 'function') ? eaFilterSignature() : '',
+        n: (window.__eaLastFiltered && window.__eaLastFiltered.length) || 0
+      };
+      window.__eaSavedZoom = state;
+      try { localStorage.setItem('ea_chart_zoom', JSON.stringify(state)); } catch (e) {}
+    } catch (e) {}
+  }
+  function eaRestoreChartZoom() {
+    try {
+      let state = window.__eaSavedZoom;
+      if (!state) {
+        try { state = JSON.parse(localStorage.getItem('ea_chart_zoom') || 'null'); } catch (e) {}
+      }
+      if (!state || !chartInstance || !chartInstance.options || !chartInstance.options.scales) return;
+      // Only restore if same filter signature (otherwise scale is meaningless)
+      try {
+        if (state.filterSig && typeof eaFilterSignature === 'function' &&
+            state.filterSig !== eaFilterSignature()) return;
+      } catch (e) {}
+      const x = chartInstance.options.scales.x;
+      if (x) {
+        if (state.xMin != null && isFinite(Number(state.xMin))) x.min = Number(state.xMin);
+        if (state.xMax != null && isFinite(Number(state.xMax))) x.max = Number(state.xMax);
+      }
+      try { chartInstance.update('none'); } catch (e) {}
+    } catch (e) {}
+  }
+
+  function appendLiveToCharts(r, opts) {
     if (!r) return false;
+    const force = !!(opts && opts.force);
     try {
       // Always keep full cache in sync (dedupe)
       // Only mutate cache if it already holds the full archive (or a real Apply load).
       // Never start a 1–N item cache from live captures alone — that hid the 6k history.
       if (Array.isArray(window.__eaCachedAll) && window.__eaCachedAll.length > 50) {
-        const exists = window.__eaCachedAll.some(x =>
-          x.id === r.id ||
-          (Math.abs(Number(x.wpm) - Number(r.wpm)) < 0.05 &&
-           Math.abs((Number(x.timestamp) || 0) - (Number(r.timestamp) || 0)) < 15000)
-        );
+        const exists = window.__eaCachedAll.some(x => {
+          const xid = x && x.id != null && String(x.id) !== '' ? String(x.id) : null;
+          const rid = r && r.id != null && String(r.id) !== '' ? String(r.id) : null;
+          if (xid && rid && xid === rid) return true;
+          return Math.abs(Number(x.wpm) - Number(r.wpm)) < 0.05 &&
+            Math.abs((Number(x.timestamp) || 0) - (Number(r.timestamp) || 0)) < 15000;
+        });
         if (!exists) window.__eaCachedAll.push(r);
       } else if (window.__eaEverFiltered) {
         // User already filtered once — refresh full list in background
@@ -4767,11 +5146,17 @@
           }
         } catch (e) {}
       }
-      if (!matches) {
+      if (!matches && !force) {
         console.log('[EA] live saved, filters mismatch', {
           mode: r.mode, type: r.type, tags: r.tags, wpm: r.wpm,
           filterTags: currentFilters.tags, filterModes: currentFilters.mode
         });
+        // Still queue so a later Apply / archive open with matching filters can pick it up
+        if (!window.__eaPendingLive) window.__eaPendingLive = [];
+        if (!window.__eaPendingLive.some(x => x.id && r.id && x.id === r.id)) {
+          window.__eaPendingLive.push(r);
+        }
+        window.__eaDirtyCharts = true;
         return false;
       }
       // Always force a real wall-clock timestamp before graph/DB use
@@ -4809,11 +5194,16 @@
 
       if (!window.__eaLastFiltered) window.__eaLastFiltered = [];
       // Find near-duplicate already on the graph (same test re-saved)
-      let liveIdx = window.__eaLastFiltered.findIndex(x =>
-          x.id === r.id ||
-          (Math.abs(Number(x.wpm) - Number(r.wpm)) < 0.08 &&
-           Math.abs(Number(x.acc != null ? x.acc : -1) - Number(r.acc != null ? r.acc : -2)) < 0.6 &&
-           Math.abs((Number(x.timestamp) || 0) - (Number(r.timestamp) || 0)) < 90000));
+      // IMPORTANT: never treat undefined===undefined as an id match (that blocked all new points)
+      let liveIdx = window.__eaLastFiltered.findIndex(x => {
+          const xid = x && x.id != null && String(x.id) !== '' ? String(x.id) : null;
+          const rid = r && r.id != null && String(r.id) !== '' ? String(r.id) : null;
+          if (xid && rid && xid === rid) return true;
+          const sameWpm = Math.abs(Number(x.wpm) - Number(r.wpm)) < 0.08;
+          const sameAcc = Math.abs(Number(x.acc != null ? x.acc : -1) - Number(r.acc != null ? r.acc : -2)) < 0.6;
+          const sameTs = Math.abs((Number(x.timestamp) || 0) - (Number(r.timestamp) || 0)) < 20000;
+          return sameWpm && sameAcc && sameTs;
+      });
       if (liveIdx >= 0) {
         // Update meta in place — do NOT add another scatter point
         const prev = window.__eaLastFiltered[liveIdx];
@@ -4868,33 +5258,12 @@
         stDs.data.push({ x, y: Math.min(30, Math.max(0, r.stumblePct)) });
       }
 
-      // Rolling averages INCLUDE the new point (already in __eaLastFiltered)
+      // Rolling averages — same formulas as full renderGraph (trueAverage aware)
       try {
-        const slice10 = window.__eaLastFiltered.slice(-10);
-        const slice100 = window.__eaLastFiltered.slice(-100);
-        const avg = (arr, key) => {
-          const vals = arr.map(z => z[key]).filter(v => v != null && !Number.isNaN(v));
-          if (!vals.length) return null;
-          return vals.reduce((a, b) => a + b, 0) / vals.length;
-        };
-        const a10w = avg(slice10, 'wpm');
-        const a100w = avg(slice100, 'wpm');
-        const a10a = avg(slice10, 'acc');
-        const a100a = avg(slice100, 'acc');
-        const a10s = avg(slice10, 'stumblePct');
-        const a100s = avg(slice100, 'stumblePct');
-        const pushAvg = (label, y) => {
-          const d = findDs(label);
-          if (!d || y == null) return;
-          d.data.push({ x, y: label.includes('Acc') ? Math.max(90, y) : y });
-        };
-        pushAvg('Avg of 10 (WPM)', a10w);
-        pushAvg('Avg of 100 (WPM)', a100w);
-        pushAvg('Avg of 10 (Acc)', a10a);
-        pushAvg('Avg of 100 (Acc)', a100a);
-        pushAvg('Avg of 10 (Stumble %)', a10s);
-        pushAvg('Avg of 100 (Stumble %)', a100s);
-      } catch (e) {}
+        refreshAveragesTail(chartInstance, window.__eaLastFiltered, x);
+      } catch (e) {
+        console.warn('[EA] avg tail', e);
+      }
 
       // Expand x-axis so the new point fits with same padding as full Apply render
       // (max = lastIndex + max(2, 4% of count)) — no full graph rebuild
@@ -4934,6 +5303,26 @@
       } catch (e) {}
 
       chartInstance.update('none');
+      // Keep graph cache in sync for daily/monthly incremental later
+      try {
+        const cache = eaEnsureGraphCache();
+        const filtered = window.__eaLastFiltered || [];
+        cache.filtered = filtered.slice();
+        cache.sig = eaFilterSignature();
+        cache.daily = eaIncrementalDaily(cache.daily, filtered, [r]);
+        cache.monthly = eaIncrementalMonthly(cache.monthly, filtered, [r]);
+        if (cache.daily) {
+          window.__eaDailyAggOverride = cache.daily;
+          try { renderDailyGraph(filtered); } catch (e) {}
+          window.__eaDailyAggOverride = null;
+        }
+        if (cache.monthly) {
+          window.__eaMonthlyAggOverride = cache.monthly;
+          try { renderMonthlyGraph(filtered); } catch (e) {}
+          window.__eaMonthlyAggOverride = null;
+        }
+        try { renderImproveGraph(filtered); } catch (e) {}
+      } catch (e) {}
       // remove from pending once drawn
       window.__eaPendingLive = (window.__eaPendingLive || []).filter(x => x.id !== r.id);
       window.__eaDirtyCharts = (window.__eaPendingLive && window.__eaPendingLive.length > 0);
@@ -5566,6 +5955,7 @@
         ta.checked = !!trueAverage;
         ta.onchange = () => {
           trueAverage = !!ta.checked;
+          try { eaInvalidateGraphCache('trueAverage toggle'); } catch (e) {}
           saveUiPrefs();
           renderArchive();
         };
@@ -5630,6 +6020,11 @@
         renderArchive();
       };
       root.querySelector('#ea-apply-filters').onclick = async () => {
+        try {
+          window.__eaSavedZoom = null;
+          localStorage.removeItem('ea_chart_zoom');
+        } catch (e) {}
+
         window.__eaEverFiltered = true;
         window.__eaPanelReady = true;
         collectFiltersFromUI();
@@ -5700,15 +6095,37 @@
         try {
           ensureFilterChips();
           flushPendingLiveToCharts();
+          if (chartInstance && Array.isArray(window.__eaLastFiltered) && window.__eaLastFiltered.length) {
+            refreshAveragesTail(chartInstance, window.__eaLastFiltered, window.__eaLastFiltered.length - 1);
+            try { chartInstance.update('none'); } catch (e) {}
+          }
           window.__eaHadCharts = true;
-          return;
         } catch (e) { console.warn('[EA] pending append', e); }
       }
+      // Recover tests saved while panel was closed / blocked by bad id-match
+      try {
+        if (chartInstance && Array.isArray(window.__eaLastFiltered) && window.__eaLastFiltered.length) {
+          const last = window.__eaLastFiltered[window.__eaLastFiltered.length - 1];
+          const lastTs = Number(last && last.timestamp) || 0;
+          Promise.resolve(getAllResults()).then((all) => {
+            if (!Array.isArray(all) || !all.length) return;
+            const newer = all
+              .filter(x => (Number(x.timestamp) || 0) > lastTs + 500)
+              .sort((a, b) => (Number(a.timestamp) || 0) - (Number(b.timestamp) || 0));
+            let added = 0;
+            for (const r of newer.slice(-40)) {
+              try { if (appendLiveToCharts(r)) added++; } catch (e) {}
+            }
+            if (added) console.log('[EA] recovered', added, 'results onto chart');
+          }).catch(() => {});
+        }
+      } catch (e) {}
       // If canvas exists and was drawn before, skip full reload
       try {
         const canvas = document.getElementById('ea-graph');
         if (canvas && canvas.getContext('2d') && window.__eaHadCharts) {
           ensureFilterChips();
+          try { eaRestoreChartZoom(); } catch (e) {}
           return;
         }
       } catch (e) {}
@@ -5749,6 +6166,7 @@
   }
 
   function closePanel() {
+    try { eaSaveChartZoom(); } catch (e) {}
     document.getElementById('ea-root')?.classList.remove('open');
     panelOpen = false;
     // Keep __eaPanelReady + charts in memory for instant reopen
@@ -6221,6 +6639,7 @@
   }
 
   function buildDailyAggregates(results) {
+    if (window.__eaDailyAggOverride) return window.__eaDailyAggOverride;
     const byDay = new Map();
     results.forEach(r => {
       const ts = resultTsMs(r);
@@ -6256,6 +6675,7 @@
   }
 
   function buildMonthlyAggregates(results) {
+    if (window.__eaMonthlyAggOverride) return window.__eaMonthlyAggOverride;
     const byMonth = new Map();
     results.forEach(r => {
       const ts = resultTsMs(r);
@@ -6321,9 +6741,9 @@
         i++;
       }
       if (!windowTests.length) break;
-      // Drop a trailing partial block if < 50% full (except if it's the only block)
-      if (sec < BLOCK_SEC * 0.5 && blocks.length > 0) break;
-
+      // Always keep every block, including a trailing partial (so "last week"
+      // still shows block 2 with the remaining hours instead of hiding them).
+      // Partial = under a full 10h of effective typing.
       blocks.push({
         avgWpm: weightedMeanFromResults(windowTests, r => r.wpm),
         avgAcc: weightedMeanFromResults(windowTests, r => r.acc),
@@ -6332,7 +6752,8 @@
           r => r.stumblePct
         ),
         hours: sec / 3600,
-        count: windowTests.length
+        count: windowTests.length,
+        partial: sec < BLOCK_SEC * 0.99
       });
     }
 
@@ -6351,7 +6772,8 @@
       prevAcc: null,
       prevStumble: null,
       count: blocks[0].count,
-      hoursInBlock: blocks[0].hours
+      hoursInBlock: blocks[0].hours,
+      partial: !!blocks[0].partial
     }];
 
     for (let k = 1; k < blocks.length; k++) {
@@ -6370,7 +6792,8 @@
         prevAcc: blocks[k - 1].avgAcc,
         prevStumble: prevS,
         count: blocks[k].count,
-        hoursInBlock: blocks[k].hours
+        hoursInBlock: blocks[k].hours,
+        partial: !!blocks[k].partial
       });
     }
     return series;
@@ -6920,7 +7343,8 @@
                     `Block avg WPM: ${d.avgWpm.toFixed(2)}`,
                     `Block avg Acc: ${d.avgAcc.toFixed(2)}%`,
                     `Tests in block: ${d.count}`,
-                    `Hours in block: ${d.hoursInBlock.toFixed(2)}`
+                    `Hours in block: ${d.hoursInBlock.toFixed(2)}` +
+                      (d.partial ? ' (partial)' : '')
                   ];
                   if (d.avgStumble != null) {
                     lines.splice(3, 0, `Block avg Stumble: ${d.avgStumble.toFixed(2)}%`);
@@ -7054,10 +7478,21 @@
     }
     // Defer heavy chart builds so the panel chrome paints first (big DBs)
     const runCharts = () => {
+      let incremental = false;
+      try {
+        incremental = tryIncrementalGraph(filtered);
+      } catch (e) {
+        console.warn(e);
+      }
+      if (incremental) {
+        try { eaRestoreChartZoom(); } catch (e) {}
+        return;
+      }
       try { renderGraph(filtered); } catch (e) { console.warn(e); }
       try { renderDailyGraph(filtered); } catch (e) { console.warn(e); }
       try { renderMonthlyGraph(filtered); } catch (e) { console.warn(e); }
       try { renderImproveGraph(filtered); } catch (e) { console.warn(e); }
+      try { eaRestoreChartZoom(); } catch (e) {}
     };
     if (typeof requestIdleCallback === 'function') {
       requestIdleCallback(runCharts, { timeout: 200 });
@@ -7307,7 +7742,7 @@
     try { window.__eaReconcileStumbles = _rec; } catch (e) {}
     try { if (typeof unsafeWindow !== 'undefined') unsafeWindow.__eaReconcileStumbles = _rec; } catch (e) {}
     try { globalThis.__eaReconcileStumbles = _rec; } catch (e) {}
-  
+
     // Auto-sync every 6h only when tab hidden / window unfocused / 2 min idle
     if (!window.__eaIdleSyncScheduled) {
       window.__eaIdleSyncScheduled = true;
@@ -14032,7 +14467,7 @@
     };
 
 
-    
+
 
 
 
@@ -14211,7 +14646,7 @@
       return null;
     }
 
-    
+
     function isMtLoggedIn() {
       try {
         // Monkeytype sets body class or account button
@@ -14498,7 +14933,7 @@
         return '<b style="color:#e06c75">Loss</b>';
       }
 
-      
+
       const importBtn = modal.querySelector('#kc-cl-import');
       if (importBtn) {
         importBtn.onclick = async () => {
@@ -14754,7 +15189,7 @@
     } catch (e) {}
   }, 400);
 
-  
+
   // ---- Debug helpers (console) ----
   window.__kcDebugResult = function () {
     const r = document.getElementById('result');
